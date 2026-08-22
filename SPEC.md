@@ -1,7 +1,7 @@
-# Reel — Technical Specification
+# Vantage — Technical Specification
 
 **Status:** Reference spec for a future handoff agent.
-**Owner:** Reel team (engineering).
+**Owner:** Vantage team (engineering).
 **Version:** 1.0
 **Read-first:** Section 7 (Phased Build Order) governs **what may be built now.** This document describes the full product for context; only Phase 1 is in scope for the first build. Phase 2 and Phase 3 features are explicitly marked with **[PHASE 2]** / **[PHASE 3]** tags so a handoff agent cannot accidentally build beyond Phase 1.
 
@@ -11,10 +11,10 @@
 
 ### 1.1 Product goals
 
-Reel lets a normal person make a polished video with **zero editing skill**. Two input modes:
+Vantage lets a normal person make a polished video with **zero editing skill**. Two input modes:
 
-- **Solo** — a single user uploads their own videos and photos from their phone and Reel turns them into one finished, auto-cut video.
-- **Collaborative** — everyone at an event (concert, wedding, party, sports game) uploads their own clips into one shared "event pool." Reel lines every clip up in time by matching their audio against each other, then auto-cuts between the best angle at every moment as if a live TV director were switching cameras. It returns one finished video to the event organizer (and optionally to contributors).
+- **Solo** — a single user uploads their own videos and photos from their phone and Vantage turns them into one finished, auto-cut video.
+- **Collaborative** — everyone at an event (concert, wedding, party, sports game) uploads their own clips into one shared "event pool." Vantage lines every clip up in time by matching their audio against each other, then auto-cuts between the best angle at every moment as if a live TV director were switching cameras. It returns one finished video to the event organizer (and optionally to contributors).
 
 Two hard technical problems define the product:
 
@@ -300,7 +300,7 @@ The **client never streams media through the API.** The client asks for a presig
 |--------|------|-----|------|-------|
 | POST | `/v1/webhooks` | `{url, events[]}` | `201 sub` | Owner creates. `secret` returned once. |
 | DELETE | `/v1/webhooks/{id}` | — | `204` | Owner. |
-| (outbound) | `POST <url>` | `{event_type, payload}` + `X-Reel-Signature: HMAC` | expect `2xx` | Worker dispatches from queue with retry/backoff. Events: `event.synced`, `export.ready`, `export.failed`. |
+| (outbound) | `POST <url>` | `{event_type, payload}` + `X-Vantage-Signature: HMAC` | expect `2xx` | Worker dispatches from queue with retry/backoff. Events: `event.synced`, `export.ready`, `export.failed`. |
 
 ---
 

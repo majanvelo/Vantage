@@ -1,13 +1,13 @@
-# Reel — Handoff Package
+# Vantage — Handoff Package
 
-This package hands the **Reel product build** to a cto.new agent. Follow these
+This package hands the **Vantage product build** to a cto.new agent. Follow these
 instructions in **exact order**. Do not skip ahead, do not improvise scope.
 
 ---
 
 ## Step 1 — Push this package to GitHub
 
-1. Create **one** GitHub repository for Reel (monorepo). Example name: `reel`.
+1. Create **one** GitHub repository for Vantage (monorepo). Example name: `vantage`.
 2. Push the entire contents of this directory to that repo's `main` branch —
    including `SPEC.md`, this `README.md`, and the `apps/` and `docs/` folders.
 
