@@ -29,7 +29,11 @@ Order)** of the spec for the exact scope.
 - `events`, `event_members`, `clips`, `ingestion_jobs`, `sync_groups`,
   `sync_placements` tables (Phase-1 subset of §2).
 - API: auth, event create/invite/join, clip presign + complete + list,
-  `/sync` trigger + status (§3 Phase-1 subset).
+  `/sync` trigger + status (§3 Phase-1 subset). **Collaborative join is driven by a
+  central share link** (`/e/<invite_code>`): the organizer shares one link and
+  contributors open it and drop clips in without creating an account first (device/
+  anonymous upload token, with account collection deferred to when they want to keep
+  their clip or the finished film — see §3 auth model).
 - S3 presigned upload path.
 - Worker: per-clip ingestion (extract audio via `ffmpeg`, compute log-mel +
   onset + loudness features), pairwise cross-correlation offsets,

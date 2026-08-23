@@ -14,7 +14,7 @@
 Vantage lets a normal person make a polished video with **zero editing skill**. Two input modes:
 
 - **Solo** — a single user uploads their own videos and photos from their phone and Vantage turns them into one finished, auto-cut video.
-- **Collaborative** — everyone at an event (concert, wedding, party, sports game) uploads their own clips into one shared "event pool." Vantage lines every clip up in time by matching their audio against each other, then auto-cuts between the best angle at every moment as if a live TV director were switching cameras. It returns one finished video to the event organizer (and optionally to contributors).
+- **Collaborative** — everyone at an event (concert, wedding, party, sports game) uploads their own clips into one shared "event pool." The organizer shares a **central link** and each contributor opens it and drops their clips straight in (no account needed to contribute). Vantage lines every clip up in time by matching their audio against each other, then auto-cuts between the best angle at every moment as if a live TV director were switching cameras. It returns one finished video to the event organizer (and optionally to contributors).
 
 Two hard technical problems define the product:
 
@@ -103,7 +103,7 @@ CREATE TABLE events (
   description  TEXT,
   starts_at    TIMESTAMPTZ,          -- nominal event window (informational)
   ends_at      TIMESTAMPTZ,
-  invite_code  TEXT UNIQUE NOT NULL, -- short join code for contributors
+  invite_code  TEXT UNIQUE NOT NULL, -- short join code, embedded in the central share link contributors open to drop clips in
   status       TEXT NOT NULL DEFAULT 'open'
                CHECK (status IN ('open','syncing','rendering','finished','closed')),
   created_at   TIMESTAMPTZ DEFAULT now() NOT NULL,
@@ -248,7 +248,7 @@ CREATE TABLE webhook_subscriptions (
 
 ## 3. API endpoints
 
-REST-ish, JSON over HTTPS, all under `/v1`. **Auth model:** mobile app clients authenticate with a bearer token (JWT) issued from an email/magic-link or device login at `/v1/auth/*`. Endpoints that act on other users' data check ownership/event-membership server-side before allowing the action. Contributor uploads require membership in the event; only the event owner may trigger render/export and read the finished film URL. Invite joins are the one user-initiated association endpoint.
+REST-ish, JSON over HTTPS, all under `/v1`. **Auth model:** the product honors "upload → done" — a contributor who opens a **central share link** can drop clips into the event without creating an account first (device/anonymous upload token bound to the event, issued on join). A real account is only collected later, when they want to keep/link their clip or the finished film. Mobile app owners authenticate with a bearer token (JWT) from email/magic-link or device login at `/v1/auth/*`. Endpoints that act on other users' data check ownership/event-membership server-side before allowing the action. Only the event owner may trigger render/export and read the finished film URL. Joining via the central link (or typed code) is the primary user-initiated association endpoint.
 
 ### 3.1 Auth
 
@@ -263,8 +263,8 @@ REST-ish, JSON over HTTPS, all under `/v1`. **Auth model:** mobile app clients a
 |--------|------|-----|------|-------|
 | POST | `/v1/events` | `{title, mode, starts_at?, ends_at?}` | `201 Event` | Auth. Creates owner membership. `solo` events get one member. |
 | GET | `/v1/events/{id}` | — | `Event + membership` | Membership-gated. |
-| POST | `/v1/events/{id}/invite` | — | `{invite_code}` | Owner only. Regenerates code. |
-| POST | `/v1/events/join` | `{invite_code}` | `200 Membership` | Any authed user may join a valid open code. |
+| POST | `/v1/events/{id}/invite` | — | `201 {invite_code, share_url}` | Owner only. Regenerates code; `share_url` is the **central link** (`/e/<invite_code>` or `vantage.app/e/<invite_code>`) everyone opens to drop clips into the shared pool. |
+| POST | `/v1/events/join` | `{invite_code}` | `200 Membership` | Open the central link or type the code → joins the event (no account required to upload; see §3.1 auth model below). |
 
 ### 3.3 Clip upload (presigned URL pattern)
 
