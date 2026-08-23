@@ -1,0 +1,34 @@
+# Local development dependencies for Vantage.
+# Provides the two external services the app's architecture uses:
+#   - db    : Postgres  — primary data store (see SPEC §2 Data model)
+#   - redis : Redis    — job/queue backend for the worker pipeline (ingestion/export jobs)
+#
+# Run with:  docker compose up -d
+# No application service is defined here — only the external dependencies.
+
+services:
+  db:
+    image: postgres:16
+    container_name: vantage-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vantage
+      POSTGRES_PASSWORD: vantage
+      POSTGRES_DB: vantage
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: vantage-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  db_data:
+  redis_data:

@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vantage — App Concept</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap');
+
+  :root{
+    --base: #12151A;
+    --panel: #1B2028;
+    --panel-2: #232A34;
+    --line: #313944;
+    --amber: #E8A33D;
+    --red: #D6534A;
+    --teal: #4FB3A9;
+    --paper: #EDEEF0;
+    --muted: #7C8493;
+    --mono: 'JetBrains Mono', monospace;
+    --sans: 'Manrope', sans-serif;
+  }
+
+  *{box-sizing:border-box;margin:0;padding:0;}
+
+  body{
+    background: var(--base);
+    font-family: var(--sans);
+    color: var(--paper);
+    padding: 60px 24px;
+    min-height: 100vh;
+  }
+
+  .intro{
+    max-width: 740px;
+    margin: 0 auto 56px;
+    text-align: center;
+  }
+  .eyebrow{
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--amber);
+    margin-bottom: 14px;
+  }
+  .intro h1{
+    font-family: var(--sans);
+    font-weight: 800;
+    font-size: clamp(32px, 5vw, 48px);
+    letter-spacing: -0.02em;
+    margin-bottom: 14px;
+  }
+  .intro p{
+    color: var(--muted);
+    font-size: 16px;
+    line-height: 1.6;
+    max-width: 540px;
+    margin: 0 auto;
+  }
+
+  .rack{
+    display: flex;
+    gap: 40px;
+    justify-content: center;
+    flex-wrap: wrap;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  .device-col{
+    display:flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 18px;
+  }
+  .device-label{
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    text-align:center;
+    max-width: 280px;
+  }
+  .device-label b{ color: var(--paper); font-weight: 600; }
+
+  .phone{
+    width: 300px;
+    height: 630px;
+    background: var(--panel);
+    border-radius: 42px;
+    border: 8px solid #06070A;
+    box-shadow: 0 30px 60px -20px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.03);
+    overflow: hidden;
+    position: relative;
+    display:flex;
+    flex-direction: column;
+  }
+  .notch{
+    position:absolute;
+    top:0; left:50%;
+    transform: translateX(-50%);
+    width: 120px; height: 22px;
+    background: #06070A;
+    border-bottom-left-radius: 14px;
+    border-bottom-right-radius: 14px;
+    z-index: 20;
+  }
+
+  .topbar{
+    padding: 34px 18px 12px;
+    display:flex;
+    align-items:center;
+    justify-content: space-between;
+  }
+  .wordmark{
+    font-family: var(--sans);
+    font-weight: 800;
+    font-size: 17px;
+    letter-spacing: -0.02em;
+    color: var(--paper);
+    display:flex;
+    align-items:center;
+    gap:6px;
+  }
+  .wordmark .dot{ width:7px;height:7px;border-radius:50%;background:var(--red); }
+
+  /* ---------- SCREEN 1: CREATE EVENT ---------- */
+  .create-body{
+    flex:1;
+    padding: 10px 20px 20px;
+    display:flex;
+    flex-direction:column;
+    gap: 18px;
+  }
+  .field-label{
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  .field{
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 13px 14px;
+    font-size: 14px;
+    color: var(--paper);
+    font-weight: 600;
+  }
+  .code-box{
+    background: var(--panel-2);
+    border: 1px dashed var(--amber);
+    border-radius: 10px;
+    padding: 18px;
+    text-align:center;
+  }
+  .code-box .code{
+    font-family: var(--mono);
+    font-size: 26px;
+    letter-spacing: 0.18em;
+    color: var(--amber);
+    font-weight: 700;
+  }
+  .code-box .code-sub{
+    font-family: var(--mono);
+    font-size: 9.5px;
+    color: var(--muted);
+    letter-spacing: 0.06em;
+    margin-top: 6px;
+    text-transform:uppercase;
+  }
+  .invite-list{
+    display:flex;
+    flex-direction:column;
+    gap: 8px;
+  }
+  .invite-row{
+    display:flex;
+    align-items:center;
+    gap: 10px;
+    padding: 9px 10px;
+    background: var(--panel-2);
+    border-radius: 8px;
+  }
+  .invite-avatar{
+    width:26px;height:26px;border-radius:50%;
+    background: linear-gradient(135deg, var(--teal), #2c6e6b);
+  }
+  .invite-name{ font-size: 12.5px; font-weight:600; flex:1; }
+  .invite-status{
+    font-family: var(--mono);
+    font-size: 9px;
+    color: var(--teal);
+    text-transform: uppercase;
+  }
+  .cta{
+    margin-top: auto;
+    background: var(--amber);
+    color: #17130A;
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 12.5px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    padding: 15px;
+    border-radius: 10px;
+    text-align:center;
+  }
+
+  /* ---------- SCREEN 2: SYNCING CLIPS ---------- */
+  .sync-body{
+    flex:1;
+    padding: 10px 18px 16px;
+    display:flex;
+    flex-direction:column;
+    gap: 14px;
+  }
+  .sync-status{
+    display:flex;
+    align-items:center;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--teal);
+  }
+  .pulse{
+    width:8px;height:8px;border-radius:50%;
+    background: var(--teal);
+    box-shadow: 0 0 0 0 rgba(79,179,169,0.6);
+    animation: pulse 1.6s infinite;
+  }
+  @keyframes pulse{
+    0%{ box-shadow: 0 0 0 0 rgba(79,179,169,0.5); }
+    70%{ box-shadow: 0 0 0 8px rgba(79,179,169,0); }
+    100%{ box-shadow: 0 0 0 0 rgba(79,179,169,0); }
+  }
+
+  .clip-card{
+    background: var(--panel-2);
+    border-radius: 10px;
+    padding: 12px;
+    display:flex;
+    flex-direction:column;
+    gap: 8px;
+  }
+  .clip-head{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+  }
+  .clip-who{
+    display:flex; align-items:center; gap:8px;
+    font-size: 12.5px; font-weight:700;
+  }
+  .clip-avatar{ width:20px;height:20px;border-radius:50%; }
+  .clip-tag{
+    font-family: var(--mono);
+    font-size: 9px;
+    padding: 3px 7px;
+    border-radius: 20px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .tag-synced{ background: rgba(79,179,169,0.16); color: var(--teal); }
+  .tag-pending{ background: rgba(232,163,61,0.16); color: var(--amber); }
+
+  .waveform{
+    height: 32px;
+    display:flex;
+    align-items:center;
+    gap: 2px;
+  }
+  .waveform span{
+    width: 3px;
+    background: var(--teal);
+    border-radius: 2px;
+    opacity: 0.75;
+  }
+  .waveform.pending span{ background: var(--muted); opacity:0.5; }
+
+  .timecode-tiny{
+    font-family: var(--mono);
+    font-size: 9.5px;
+    color: var(--muted);
+  }
+
+  /* ---------- SCREEN 3: MULTICAM SWITCHER ---------- */
+  .switch-preview{
+    margin: 8px 14px 0;
+    aspect-ratio: 4/3;
+    border-radius: 10px;
+    background: linear-gradient(150deg,#3a3226,#1f1b15 55%,#131110);
+    position: relative;
+    overflow:hidden;
+    border: 1px solid var(--line);
+  }
+  .live-tag{
+    position:absolute;
+    top:10px; left:10px;
+    background: var(--red);
+    color: #fff;
+    font-family: var(--mono);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    padding: 4px 8px;
+    border-radius: 4px;
+    display:flex; align-items:center; gap:5px;
+  }
+  .live-tag .dot{ width:5px;height:5px;border-radius:50%;background:#fff; }
+  .preview-timecode{
+    position:absolute;
+    bottom:10px; right:12px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: rgba(255,255,255,0.85);
+  }
+  .preview-cam-label{
+    position:absolute;
+    bottom:10px; left:12px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: rgba(255,255,255,0.85);
+  }
+
+  .lanes{
+    margin: 14px 14px 0;
+    display:flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .lane{
+    display:flex;
+    align-items:center;
+    gap: 8px;
+    background: var(--panel-2);
+    border-radius: 6px;
+    padding: 6px 8px;
+    border: 1px solid transparent;
+  }
+  .lane.active{
+    border-color: var(--amber);
+    background: rgba(232,163,61,0.08);
+  }
+  .lane-label{
+    font-family: var(--mono);
+    font-size: 9px;
+    color: var(--muted);
+    width: 38px;
+    flex-shrink:0;
+  }
+  .lane.active .lane-label{ color: var(--amber); font-weight:700; }
+  .lane-strip{
+    flex:1;
+    height: 18px;
+    border-radius: 4px;
+    background: repeating-linear-gradient(90deg, #2c333d, #2c333d 3px, #333c47 3px, #333c47 6px);
+    position: relative;
+  }
+  .lane.active .lane-strip{
+    background: repeating-linear-gradient(90deg, rgba(232,163,61,0.35), rgba(232,163,61,0.35) 3px, rgba(232,163,61,0.55) 3px, rgba(232,163,61,0.55) 6px);
+  }
+  .playhead{
+    position:absolute;
+    top: -4px; bottom: -4px;
+    width: 2px;
+    background: var(--red);
+    left: 42%;
+  }
+
+  .switch-footer{
+    margin-top: auto;
+    padding: 14px 18px 20px;
+    display:flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .footer-row{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+  }
+  .footer-note{
+    font-family: var(--mono);
+    font-size: 9.5px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+  .export-btn{
+    background: var(--amber);
+    color: #17130A;
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 12px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    padding: 13px;
+    border-radius: 10px;
+    text-align:center;
+  }
+  .regen-link{
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--teal);
+    text-align:center;
+    text-decoration: underline;
+  }
+
+  .notes{
+    max-width: 760px;
+    margin: 64px auto 0;
+    border-top: 1px solid var(--line);
+    padding-top: 32px;
+    display:grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 28px;
+  }
+  .note-item .n-label{
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--teal);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+  .note-item p{
+    font-size: 13.5px;
+    color: var(--muted);
+    line-height: 1.55;
+  }
+
+  @media (max-width: 680px){
+    .notes{ grid-template-columns: 1fr; }
+    .phone{ width: 270px; height: 570px; }
+  }
+</style>
+</head>
+<body>
+
+  <div class="intro">
+    <div class="eyebrow">App Concept</div>
+    <h1>Vantage</h1>
+    <p>Everyone at an event uploads their own clips into one shared timeline. The app lines them all up by matching the audio, then auto-cuts between angles like a live TV switcher — steadiest shot, best audio, face in frame — and hands back one finished video.</p>
+  </div>
+
+  <div class="rack">
+
+    <!-- SCREEN 1: CREATE EVENT -->
+    <div class="device-col">
+      <div class="phone">
+        <div class="notch"></div>
+        <div class="topbar">
+          <div class="wordmark"><span class="dot"></span>vantage</div>
+        </div>
+        <div class="create-body">
+          <div>
+            <div class="field-label">Event name</div>
+            <div class="field">Maya's Wedding — Reception</div>
+          </div>
+
+          <div class="code-box">
+            <div class="code">7F K2 Q9</div>
+            <div class="code-sub">Share this code to let anyone add clips</div>
+          </div>
+
+          <div>
+            <div class="field-label">Who's in</div>
+            <div class="invite-list">
+              <div class="invite-row">
+                <div class="invite-avatar" style="background:linear-gradient(135deg,#e8a33d,#a86a1c)"></div>
+                <div class="invite-name">Reece</div>
+                <div class="invite-status">Joined</div>
+              </div>
+              <div class="invite-row">
+                <div class="invite-avatar" style="background:linear-gradient(135deg,#8a5a8a,#4d2c4d)"></div>
+                <div class="invite-name">Priya</div>
+                <div class="invite-status">Joined</div>
+              </div>
+              <div class="invite-row">
+                <div class="invite-avatar" style="background:linear-gradient(135deg,#5a7a8a,#2c4a5a)"></div>
+                <div class="invite-name">Jordan</div>
+                <div class="invite-status" style="color:var(--muted)">Invited</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="cta">Open event &amp; start uploading</div>
+        </div>
+      </div>
+      <div class="device-label"><b>Create Event</b> — one shared room, one code to join</div>
+    </div>
+
+    <!-- SCREEN 2: SYNCING -->
+    <div class="device-col">
+      <div class="phone">
+        <div class="notch"></div>
+        <div class="topbar">
+          <div class="wordmark"><span class="dot"></span>vantage</div>
+          <div class="timecode-tiny">6 clips</div>
+        </div>
+        <div class="sync-body">
+          <div class="sync-status"><div class="pulse"></div>Matching clips by audio…</div>
+
+          <div class="clip-card">
+            <div class="clip-head">
+              <div class="clip-who"><div class="clip-avatar" style="background:#e8a33d"></div>Reece — Cam 1</div>
+              <div class="clip-tag tag-synced">Synced</div>
+            </div>
+            <div class="waveform">
+              <span style="height:40%"></span><span style="height:70%"></span><span style="height:30%"></span><span style="height:90%"></span><span style="height:50%"></span><span style="height:65%"></span><span style="height:20%"></span><span style="height:80%"></span><span style="height:45%"></span><span style="height:60%"></span><span style="height:35%"></span><span style="height:75%"></span><span style="height:25%"></span><span style="height:55%"></span><span style="height:85%"></span>
+            </div>
+            <div class="timecode-tiny">Locked to 00:14:22 — 00:16:05</div>
+          </div>
+
+          <div class="clip-card">
+            <div class="clip-head">
+              <div class="clip-who"><div class="clip-avatar" style="background:#8a5a8a"></div>Priya — Cam 2</div>
+              <div class="clip-tag tag-synced">Synced</div>
+            </div>
+            <div class="waveform">
+              <span style="height:60%"></span><span style="height:30%"></span><span style="height:80%"></span><span style="height:45%"></span><span style="height:70%"></span><span style="height:20%"></span><span style="height:90%"></span><span style="height:35%"></span><span style="height:55%"></span><span style="height:65%"></span><span style="height:40%"></span><span style="height:75%"></span><span style="height:50%"></span><span style="height:30%"></span><span style="height:85%"></span>
+            </div>
+            <div class="timecode-tiny">Locked to 00:14:19 — 00:15:58</div>
+          </div>
+
+          <div class="clip-card">
+            <div class="clip-head">
+              <div class="clip-who"><div class="clip-avatar" style="background:#5a7a8a"></div>Jordan — Cam 3</div>
+              <div class="clip-tag tag-pending">Matching…</div>
+            </div>
+            <div class="waveform pending">
+              <span style="height:30%"></span><span style="height:40%"></span><span style="height:25%"></span><span style="height:35%"></span><span style="height:20%"></span><span style="height:45%"></span><span style="height:30%"></span><span style="height:40%"></span><span style="height:25%"></span><span style="height:35%"></span><span style="height:20%"></span><span style="height:45%"></span><span style="height:30%"></span><span style="height:40%"></span><span style="height:25%"></span>
+            </div>
+            <div class="timecode-tiny">Finding overlap…</div>
+          </div>
+        </div>
+      </div>
+      <div class="device-label"><b>Syncing</b> — clips line up by matching audio, not phone clocks</div>
+    </div>
+
+    <!-- SCREEN 3: MULTICAM SWITCHER / RESULT -->
+    <div class="device-col">
+      <div class="phone">
+        <div class="notch"></div>
+        <div class="topbar">
+          <div class="wordmark"><span class="dot"></span>vantage</div>
+          <div class="timecode-tiny">Auto-cut</div>
+        </div>
+
+        <div class="switch-preview">
+          <div class="live-tag"><span class="dot"></span>LIVE CUT</div>
+          <div class="preview-cam-label">CAM 2 · PRIYA</div>
+          <div class="preview-timecode">00:15:04</div>
+        </div>
+
+        <div class="lanes">
+          <div class="lane">
+            <div class="lane-label">CAM 1</div>
+            <div class="lane-strip"></div>
+          </div>
+          <div class="lane active">
+            <div class="lane-label">CAM 2</div>
+            <div class="lane-strip"><div class="playhead"></div></div>
+          </div>
+          <div class="lane">
+            <div class="lane-label">CAM 3</div>
+            <div class="lane-strip"></div>
+          </div>
+          <div class="lane">
+            <div class="lane-label">AUDIO</div>
+            <div class="lane-strip" style="background:repeating-linear-gradient(90deg,#2c333d,#2c333d 2px,#3a4652 2px,#3a4652 4px)"></div>
+          </div>
+        </div>
+
+        <div class="switch-footer">
+          <div class="footer-note">Switched to Cam 2 at 00:14:58 — steadiest frame with clearest audio at this moment.</div>
+          <div class="export-btn">Export final video</div>
+          <div class="regen-link">Not feeling this cut? Regenerate</div>
+        </div>
+      </div>
+      <div class="device-label"><b>Auto-cut</b> — the app plays director, switching angles on its own</div>
+    </div>
+
+  </div>
+
+  <div class="notes">
+    <div class="note-item">
+      <div class="n-label">Why audio-match, not timestamps</div>
+      <p>Phone clocks drift and time zones lie. Matching the actual soundwaves picked up by each mic lines every clip up to the same real moment, accurate to a fraction of a second.</p>
+    </div>
+    <div class="note-item">
+      <div class="n-label">Why show the lanes</div>
+      <p>The multicam timeline makes the automatic edit legible — you can see which camera is "live" at any moment and why, rather than the cut feeling like a black box.</p>
+    </div>
+    <div class="note-item">
+      <div class="n-label">Why "regenerate"</div>
+      <p>Automated shot-picking won't always nail creative judgment. A one-tap re-cut (or manual override) keeps the app useful even when the first pass isn't quite right.</p>
+    </div>
+  </div>
+
+</body>
+</html>
