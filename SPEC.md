@@ -16,6 +16,8 @@ Vantage lets a normal person make a polished video with **zero editing skill**. 
 - **Solo** — a single user uploads their own videos and photos from their phone and Vantage turns them into one finished, auto-cut video.
 - **Collaborative** — everyone at an event (concert, wedding, party, sports game) uploads their own clips into one shared "event pool." The organizer shares a **central link** and each contributor opens it and drops their clips straight in (no account needed to contribute). Vantage lines every clip up in time by matching their audio against each other, then auto-cuts between the best angle at every moment as if a live TV director were switching cameras. It returns one finished video to the event organizer (and optionally to contributors).
 
+On top of the auto-cut, Vantage is **optionally theme-styled**: the user picks a theme (vacation, travel, love, school, fashion, hip-hop, food, vlog, and more) before/at upload, and at render Vantage layers theme-matched **music**, on-screen **text/subtitles**, **frames**, and **stickers** over the aligned/auto-cut timeline — the Filmora/CapCut-style polished result, but applied automatically so there is still **zero manual editing**. The theme is chosen once per film (captured on the event at upload time, §2–§3); the styling itself is applied only when the finished video renders ([PHASE 3], §6).
+
 Two hard technical problems define the product:
 
 1. **Audio sync** — aligning dozens of independently-recorded clips onto one shared timeline even when they were shot on different phones at different distances with different microphone qualities.
@@ -101,6 +103,7 @@ CREATE TABLE events (
   mode         TEXT NOT NULL CHECK (mode IN ('solo','collaborative')),
   title        TEXT NOT NULL,
   description  TEXT,
+  theme_id     UUID FK → themes.id,  -- optional chosen theme; set once at event-create/upload time, other clips/photos inherit it (§2.8)
   starts_at    TIMESTAMPTZ,          -- nominal event window (informational)
   ends_at      TIMESTAMPTZ,
   invite_code  TEXT UNIQUE NOT NULL, -- short join code, embedded in the central share link contributors open to drop clips in
@@ -244,6 +247,29 @@ CREATE TABLE webhook_subscriptions (
 -- IX: (user_id)
 ```
 
+### 2.8 Theme catalog
+
+A static catalog of run-time styling presets. The user picks one theme per film (saved on `events.theme_id`, §2.2); the theme itself drives styling only at render ([PHASE 3], §6.1). Core themes are free; `is_plus=true` themes and their sticker/graphic packs are a **Vantage Plus** perk.
+
+```sql
+CREATE TABLE themes (
+  id            UUID PK,
+  slug          TEXT UNIQUE NOT NULL,  -- e.g. 'travel', 'love', 'hiphop', 'food'
+  display_name  TEXT NOT NULL,         -- e.g. 'Travel'
+  description   TEXT,
+  genre         TEXT,                  -- soundtrack genre/mood hint, e.g. 'pop', 'lofi', 'orchestral'
+  subtitle_style TEXT,                 -- e.g. 'captions-bottom', 'bold-serif', 'lower-thirds'
+  palette       TEXT[],                -- hex colors for text/frames/overlays
+  frame_style   TEXT,                  -- e.g. 'rounded-white', 'film-grain', 'vignette'
+  sticker_pack  TEXT,                  -- ref to the sticker/graphic pack applied at render
+  is_plus       BOOLEAN DEFAULT FALSE, -- full theme/sticker library = Vantage Plus
+  sort_order    INT DEFAULT 0,         -- ordering in the picker
+  created_at    TIMESTAMPTZ DEFAULT now() NOT NULL,
+  updated_at    TIMESTAMPTZ DEFAULT now() NOT NULL
+);
+-- Core themes (is_plus=false) are free; the full library is a Plus perk.
+```
+
 ---
 
 ## 3. API endpoints
@@ -261,7 +287,7 @@ REST-ish, JSON over HTTPS, all under `/v1`. **Auth model:** the product honors "
 
 | Method | Path | Req | Resp | Notes |
 |--------|------|-----|------|-------|
-| POST | `/v1/events` | `{title, mode, starts_at?, ends_at?}` | `201 Event` | Auth. Creates owner membership. `solo` events get one member. |
+| POST | `/v1/events` | `{title, mode, starts_at?, ends_at?, theme_id?}` | `201 Event` | Auth. Creates owner membership. `solo` events get one member. `theme_id` optionally sets the event's theme at creation. |
 | GET | `/v1/events/{id}` | — | `Event + membership` | Membership-gated. |
 | POST | `/v1/events/{id}/invite` | — | `201 {invite_code, share_url}` | Owner only. Regenerates code; `share_url` is the **central link** (`/e/<invite_code>` or `vantage.app/e/<invite_code>`) everyone opens to drop clips into the shared pool. |
 | POST | `/v1/events/join` | `{invite_code}` | `200 Membership` | Open the central link or type the code → joins the event (no account required to upload; see §3.1 auth model below). |
@@ -301,6 +327,15 @@ The **client never streams media through the API.** The client asks for a presig
 | POST | `/v1/webhooks` | `{url, events[]}` | `201 sub` | Owner creates. `secret` returned once. |
 | DELETE | `/v1/webhooks/{id}` | — | `204` | Owner. |
 | (outbound) | `POST <url>` | `{event_type, payload}` + `X-Vantage-Signature: HMAC` | expect `2xx` | Worker dispatches from queue with retry/backoff. Events: `event.synced`, `export.ready`, `export.failed`. |
+
+### 3.7 Themes
+
+| Method | Path | Req | Resp | Notes |
+|--------|------|-----|------|-------|
+| GET | `/v1/themes` | — | `[Theme]` | List the theme catalog. `is_plus` flags the full theme/sticker library (a **Vantage Plus** perk); core themes are free. |
+| PATCH | `/v1/events/{id}/theme` | `{theme_id}` or `{theme_id: null}` | `200 Theme` | Owner. Set (`{theme_id}`) or clear (`{theme_id: null}`) the event's theme. Also settable at event creation (§3.2). |
+
+Storing the chosen theme (the field on `events`, the UI, and these endpoints) is lightweight and early. **Applying** the theme — matched music, on-screen text/subtitles, frames, stickers layered onto the auto-cut timeline — happens only at render and is **[PHASE 3]** (§6.1).
 
 ---
 
@@ -443,6 +478,16 @@ Turns the auto-cut shot list (timeline + decisions from §5) into one finished v
 4. **Output:** `libx264`/`libx265`, AAC audio, MP4 container, 1080p default (configurable via `export_jobs.params`). Upload final MP4 to S3, set `output_key`, mark `succeeded`, emit signed URL, fire `export.ready` webhook + in-app notification. Progress reported as segments complete / total.
 5. **Async execution:** triggered by `POST /render` (owner), tracked by `export_jobs`, polled via `GET /render/{job_id}`. Failures stored and retried with backoff.
 
+### 6.1 Theme-driven styling (music, text, frames, stickers) [PHASE 3]
+
+[PHASE 3] When the event has a `theme_id` (§2.2, §2.8), the render pipeline layers the chosen theme onto the auto-cut shot list (§5) before the final encode — the Filmora/CapCut-style polished result, applied automatically so there is still **zero manual editing**:
+
+1. **Background music.** Pick a track matched to the theme's `genre`/mood hint, looped/faded to the film length and **ducked** under the prime audio via the mixdown step (§6 item 3) so dialog/performance still cuts through. The `themes` table stores only a genre/mood *hint*; the actual licensed track library and its per-theme defaults are a Phase 3 asset concern, not a DB model change.
+2. **On-screen text / subtitles.** Render title cards (e.g. "Marrakech 2025") and text lines using the theme's `subtitle_style` (font, casing, placement) and `palette` (colors). Auto-generating subtitles from speech is an optional Phase 3 add-on; at minimum apply themed title cards and text overlays.
+3. **Frames & overlays.** Apply the theme's `frame_style` and `palette` as an overlay pass over the base video (borders/vignettes, grain/texture, a light color-grade tint consistent with the theme).
+4. **Sticker / graphic pack.** Composite elements from the theme's `sticker_pack` (location tags, lower-thirds, holiday/emoji motifs) at tasteful moments. Themes and sticker packs with `is_plus=true` are the **Vantage Plus** perk; core themes stay free.
+5. **Composition order.** Layer in the pipeline as: base auto-cut video → frame/color pass (§6.1.3) → text/subtitle overlay (§6.1.2) → stickers (§6.1.4) → music mixdown (§6.1.1) → final encode (§6 items 3–4). All layers are parameterized purely by the saved `theme_id`, so restyling needs only a re-render — never a re-sync or re-cut.
+
 ---
 
 ## 7. Phased build order
@@ -462,6 +507,8 @@ Turns the auto-cut shot list (timeline + decisions from §5) into one finished v
 6. Metrics/tests for sync quality: PSR distributions, solved-residual graphs, and a small labeled test set to validate alignment.
 
 **Explicitly NOT in Phase 1:** auto-cut switching (§5), export/render (§6), photos on the timeline (§4.6 — photos may be *uploaded/stored* but not placed in alignment yet), webhook outbound delivery.
+
+**Theme note (scope clarification):** theme *selection* — the `theme_id` field on `events`, the `themes` catalog read via `GET /v1/themes`, a picker UI, and setting/clearing via `POST /v1/events` / `PATCH .../theme` — is lightweight and may be stored early without changing any sync behavior. Theme *styling* (matched music, on-screen text/subtitles, frames, stickers applied at render, §6.1) is **[PHASE 3]** and is **not** part of Phase 1.
 
 **Dependencies:**
 - Depends on: object storage, Postgres, a worker, FFmpeg availability.

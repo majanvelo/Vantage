@@ -51,6 +51,8 @@ Order)** of the spec for the exact scope.
   but not placed in alignment.)
 - ❌ Webhook outbound delivery — Phase 3.
 
+**Theme note (Phase-1 scope clarification):** theme *selection* (storing a chosen theme on the event, `theme_id`, plus `GET /v1/themes` and a picker) is lightweight and may be reflected in the Phase-1 event UI/stored field without changing sync behavior. Theme *styling* — matched music, on-screen text/subtitles, frames, stickers applied at render (§6.1) — is **Phase 3**; do not build it during Phase 1.
+
 The spec tags all out-of-scope features with **[PHASE 2]** / **[PHASE 3]** so
 they are easy to avoid. Ignore them for now.
 
