@@ -265,3 +265,173 @@ export const addClip = createServerFn({ method: "POST" }).handler(
     return { ok: true as const, clip: rows[0] };
   }
 );
+
+// ---------------------------------------------------------------------------
+// POST /api/events/:id/clips/upload  → REAL file upload: materialise actual byte
+// bytes to disk, persist a clip row pointing at them, and (best-effort) extract
+// + cache audio features for later alignment.
+//
+// The file arrives base64-encoded in the server-function payload (simplest way to
+// move binary through the JSON RPC without an extra multipart route). The server
+// decodes it, writes it under uploads/<event>/<clipId>.<ext>, and stores the path
+// in s3_or_storage_key. No external object store — fully self-hosted.
+// ---------------------------------------------------------------------------
+export type UploadResult = {
+  ok: boolean;
+  message?: string;
+  clip?: Clip;
+  featuresOk?: boolean;
+};
+
+export const uploadClip = createServerFn({ method: "POST" }).handler(
+  async ({
+    data,
+  }: {
+    data: {
+      event_id?: unknown;
+      uploader?: unknown;
+      filename?: unknown;
+      content_type?: unknown;
+      media_type?: unknown;
+      data_base64?: unknown;
+    };
+  }): Promise<UploadResult> => {
+    await ensureSchema();
+    const eventId = typeof data?.event_id === "string" ? data.event_id : "";
+    if (!eventId) return error("Missing event id.");
+    const evs = await query(`select id from events where id = $1`, [eventId]);
+    if (evs.length === 0) return error("Event not found.");
+
+    const filename =
+      typeof data?.filename === "string" && data.filename.trim() ? data.filename.trim() : "clip";
+    const contentType = typeof data?.content_type === "string" ? data.content_type : null;
+    const uploader = typeof data?.uploader === "string" && data.uploader ? data.uploader : null;
+    const mediaType: "video" | "photo" =
+      data?.media_type === "photo"
+        ? "photo"
+        : data?.media_type === "video"
+          ? "video"
+          : contentType && contentType.startsWith("video/")
+            ? "video"
+            : contentType && contentType.startsWith("image/")
+              ? "photo"
+              : "video";
+
+    const b64 = typeof data?.data_base64 === "string" ? data.data_base64 : "";
+    if (!b64) return error("No file data received.");
+
+    // Base64 decode → real bytes.
+    let buffer: Buffer;
+    try {
+      buffer = Buffer.from(b64, "base64");
+    } catch {
+      return error("File data could not be decoded.");
+    }
+    if (buffer.length === 0) return error("Uploaded file is empty.");
+
+    // Pure helper modules pulled in lazily so node/ffmpeg deps stay server-only.
+    const { saveUpload, extFromFilename, extFromContentType } = await import("./storage");
+    const { getClipFeatures } = await import("./sync/service");
+
+    const clipId = (crypto as unknown as Crypto).randomUUID();
+    const ext =
+      extFromContentType(contentType) ??
+      (filename !== "clip" ? extFromFilename(filename) : "bin");
+    const storageKey = await saveUpload(eventId, clipId, ext, buffer);
+
+    const rows = await query<Clip>(
+      `insert into clips (id, event_id, uploader, filename, content_type, size_bytes, media_type, captured_at, s3_or_storage_key)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       returning id, event_id, uploader, filename, content_type, size_bytes::text as size_bytes,
+                 media_type, captured_at, s3_or_storage_key, created_at`,
+      [
+        clipId,
+        eventId,
+        uploader,
+        filename,
+        contentType,
+        buffer.length,
+        mediaType,
+        null,
+        storageKey,
+      ]
+    );
+
+    // Best-effort: precompute + cache audio features so "Sync now" is instant.
+    let featuresOk = false;
+    if (mediaType === "video") {
+      try {
+        const feats = await getClipFeatures(clipId, storageKey);
+        featuresOk = feats !== null;
+      } catch (e) {
+        console.error("sync: feature extraction failed at upload", e);
+      }
+    }
+    return { ok: true as const, clip: rows[0], featuresOk };
+  }
+);
+
+// ---------------------------------------------------------------------------
+// POST /api/events/:id/sync  → run the alignment and return the solved offsets.
+// Heavy work happens server-side (ffmpeg feature extraction is cached); the page
+// just POSTs and renders the returned offsets. Idempotent.
+// ---------------------------------------------------------------------------
+export type SyncEntryDto = {
+  clip_id: string;
+  offset_ms: number;
+  duration_ms: number;
+  confidence: number;
+  mean_residual_ms: number;
+};
+export type SyncResult = {
+  ok: boolean;
+  message?: string;
+  entries?: SyncEntryDto[];
+  dropped?: string[];
+  timeline_ms?: number;
+};
+
+export const runSync = createServerFn({ method: "POST" }).handler(
+  async ({ data }: { data: { event_id?: unknown } }): Promise<SyncResult> => {
+    await ensureSchema();
+    const eventId = typeof data?.event_id === "string" ? data.event_id : "";
+    if (!eventId) return error("Missing event id.");
+    const { solveEventSync } = await import("./sync/service");
+    try {
+      const out = await solveEventSync(eventId);
+      return {
+        ok: true as const,
+        entries: out.entries,
+        dropped: out.dropped,
+        timeline_ms: out.timeline_ms,
+      };
+    } catch (e) {
+      console.error("sync: runSync failed", e);
+      return { ok: false as const, message: "Alignment failed — please retry." };
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// GET /api/events/:id/sync  → return the stored alignment (no heavy work). The
+// page uses this to load existing offsets without re-solving.
+// ---------------------------------------------------------------------------
+export const getSync = createServerFn({ method: "GET" }).handler(
+  async ({ data }: { data: { event_id?: unknown } }): Promise<SyncResult> => {
+    await ensureSchema();
+    const eventId = typeof data?.event_id === "string" ? data.event_id : "";
+    if (!eventId) return error("Missing event id.");
+    const rows = await query<{ offsets: unknown; timeline_ms: number }>(
+      `select offsets, timeline_ms from event_sync where event_id = $1`,
+      [eventId]
+    );
+    if (rows.length === 0) return { ok: true as const, entries: [], dropped: [], timeline_ms: 0 };
+    const o = (rows[0].offsets ?? {}) as { entries?: SyncEntryDto[]; dropped?: string[] };
+    return {
+      ok: true as const,
+      entries: o.entries ?? [],
+      dropped: o.dropped ?? [],
+      timeline_ms: rows[0].timeline_ms,
+    };
+  }
+);

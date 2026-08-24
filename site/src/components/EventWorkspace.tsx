@@ -1,12 +1,13 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
-  addClip,
+  uploadClip,
   getEventByCode,
   joinEvent,
   type Clip,
   type Event,
   type Member,
 } from "~/lib/vantage";
+import AlignedPlayback from "~/components/AlignedPlayback";
 
 export type EventLoad =
   | { ok: true; event: Event; members: Member[]; clips: Clip[] }
@@ -37,9 +38,10 @@ export default function EventWorkspace({
 }) {
   const [data, setData] = useState<EventLoad>(initial);
   const [name, setName] = useState("");
-  const [fileName, setFileName] = useState("");
+  const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const origin = typeof window !== "undefined" ? window.location.origin : "";
   const shareUrl = `${origin}/e/${shareCode}`;
@@ -92,32 +94,40 @@ export default function EventWorkspace({
 
   async function handleUpload(e: React.FormEvent) {
     e.preventDefault();
-    if (busy || !fileName) return;
+    if (busy || !file) return;
     setBusy(true);
     setNote(null);
     try {
-      const ext = fileName.split(".").pop()?.toLowerCase() ?? "";
-      const isVideo = ["mp4", "mov", "webm", "mkv", "avi", "m4v"].includes(ext);
-      const isPhoto = ["jpg", "jpeg", "png", "gif", "webp", "heic"].includes(ext);
-      const mediaType: "video" | "photo" = isPhoto ? "photo" : "video";
-      const contentType = isPhoto
-        ? `image/${ext === "jpg" ? "jpeg" : ext}`
-        : `video/${isVideo ? ext : "mp4"}`;
-      const res = await addClip({
+      // Read the real file bytes (base64) and push them to the server, which
+      // materialises them to disk and pre-extracts audio features for sync.
+      const dataUrl: string = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(new Error("read failed"));
+        reader.readAsDataURL(file);
+      });
+      const comma = dataUrl.indexOf(",");
+      const dataBase64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+
+      const res = await uploadClip({
         data: {
           event_id: event.id,
           uploader: name || "Guest",
-          filename: fileName,
-          content_type: contentType,
-          media_type: mediaType,
-          size_bytes: Math.round((fileName.length * 137 + 1_000_000 + Math.random() * 4_000_000) / 1000) * 1000,
+          filename: file.name,
+          content_type: file.type || undefined,
+          size_bytes: file.size,
+          data_base64: dataBase64,
         },
       });
       if (!res.ok) {
-        setNote({ kind: "err", text: res.message });
+        setNote({ kind: "err", text: res.message ?? "Upload failed." });
       } else {
-        setNote({ kind: "ok", text: `Added "${fileName}" to the pool.` });
-        setFileName("");
+        setNote({
+          kind: "ok",
+          text: `Uploaded "${file.name}"${res.featuresOk ? " — audio analyzed for sync." : "."}`,
+        });
+        setFile(null);
+        if (fileInputRef.current) fileInputRef.current.value = "";
         await refresh();
       }
     } catch {
@@ -256,21 +266,23 @@ export default function EventWorkspace({
               </label>
               <div className="mt-1.5 flex flex-col gap-2 sm:flex-row">
                 <input
-                  value={fileName}
-                  onChange={(e) => setFileName(e.target.value)}
-                  placeholder="filename.mp4 or photo.jpg"
-                  className="w-full flex-1 rounded-xl border border-gray-300 px-4 py-2.5 text-gray-900 focus:border-fuchsia-500 focus:outline-none"
+                  ref={fileInputRef}
+                  type="file"
+                  accept="video/*,image/*"
+                  onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                  className="w-full flex-1 rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 file:mr-3 file:rounded-lg file:border-0 file:bg-fuchsia-100 file:px-3 file:py-1.5 file:text-sm file:font-semibold file:text-fuchsia-700 hover:file:bg-fuchsia-200"
                 />
                 <button
                   type="submit"
-                  disabled={busy || !fileName}
+                  disabled={busy || !file}
                   className="shrink-0 rounded-xl bg-gradient-to-r from-fuchsia-500 to-indigo-500 px-5 py-2.5 font-semibold text-white transition hover:opacity-90 disabled:opacity-50"
                 >
-                  {busy ? "Adding…" : "Add clip"}
+                  {busy ? "Uploading…" : "Upload clip"}
                 </button>
               </div>
               <p className="mt-1.5 text-xs text-gray-400">
-                Phase 1 records clip metadata — real file upload + auto-editing come next.
+                Real file upload — Vantage stores your video and analyzes its audio
+                for automatic alignment.
               </p>
             </form>
 
@@ -319,6 +331,13 @@ export default function EventWorkspace({
             </div>
           </div>
         </div>
+
+        {/* Aligned multi-view playback — the visible proof of the sync engine. */}
+        {clips.length > 0 && (
+          <div className="mt-6">
+            <AlignedPlayback clips={clips} eventId={event.id} />
+          </div>
+        )}
       </main>
     </div>
   );

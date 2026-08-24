@@ -41,6 +41,11 @@ for (let attempt = 1; ; attempt++) {
       hostname: HOST,
       async fetch(req) {
         const { pathname } = new URL(req.url);
+        if (pathname.startsWith("/uploads/")) {
+          // Serve materialized clip files from <site>/uploads for browser playback.
+          const file = Bun.file(import.meta.dir + pathname);
+          if (await file.exists()) return new Response(file);
+        }
         if (pathname !== "/") {
           const file = Bun.file(CLIENT_DIR + pathname);
           if (await file.exists()) return new Response(file);

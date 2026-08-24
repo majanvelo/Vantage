@@ -132,6 +132,31 @@ export async function ensureSchema(): Promise<void> {
   `);
   await query(`create index if not exists clips_event_idx on clips (event_id)`);
 
+  // Audio features extracted from each clip (cached so "Sync now" never
+  // re-decodes a video). `values` is the RMS loudness envelope (one entry per
+  // `window_ms` window), already reduced server-side by ffmpeg.
+  await query(`
+    create table if not exists audio_features (
+      clip_id     uuid primary key references clips(id) on delete cascade,
+      sample_rate integer not null,
+      window_ms   integer not null,
+      duration_ms integer not null,
+      values      jsonb not null,
+      computed_at timestamptz not null default now()
+    )
+  `);
+
+  // Result of the last global solve for an event: each clip's start offset (ms)
+  // on the shared timeline, plus which clips were dropped as un-syncable.
+  await query(`
+    create table if not exists event_sync (
+      event_id    uuid primary key references events(id) on delete cascade,
+      offsets     jsonb not null,
+      timeline_ms integer not null default 0,
+      computed_at timestamptz not null default now()
+    )
+  `);
+
   // Starter theme catalog (Phase-1 selection; is_plus marks the Plus-tier packs).
   const themes: Array<[string, string, boolean, number]> = [
     ["vacation", "Vacation", false, 1],
