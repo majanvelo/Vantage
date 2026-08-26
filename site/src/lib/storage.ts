@@ -74,6 +74,11 @@ export function extFromContentType(ct: string | null): string | null {
     "image/png": "png",
     "image/webp": "webp",
     "image/gif": "gif",
+    "image/heic": "heic",
+    "image/heif": "heif",
+    "image/heic-sequence": "heic",
+    "image/heif-sequence": "heif",
+    "image/avif": "avif",
   };
   return map[ct.toLowerCase()] ?? null;
 }

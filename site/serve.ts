@@ -41,6 +41,13 @@ for (let attempt = 1; ; attempt++) {
       hostname: HOST,
       async fetch(req) {
         const { pathname } = new URL(req.url);
+        if (pathname === "/api/upload") {
+          // Streaming multipart upload (solo flow). Handled here on the Bun
+          // server (not a TanStack route) so fs/pg/ffmpeg stay server-only and
+          // large real-phone files aren't base64'd into a server-fn JSON body.
+          const { handleUploadRequest } = await import("./src/lib/uploadHandler");
+          return handleUploadRequest(req);
+        }
         if (pathname.startsWith("/uploads/")) {
           // Serve materialized clip files from <site>/uploads for browser playback.
           const file = Bun.file(import.meta.dir + pathname);

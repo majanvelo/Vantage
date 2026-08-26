@@ -149,6 +149,17 @@ export default function SoloResult({
                   <img
                     src={`/${p.s3_or_storage_key}`}
                     alt={p.filename}
+                    onError={(e) => {
+                      // Some phone photos (e.g. HEIC/HEIF from iPhones) can't be
+                      // decoded by every browser — degrade to a labelled placeholder
+                      // instead of a broken image, and never crash the result view.
+                      const img = e.currentTarget;
+                      img.style.background =
+                        "linear-gradient(135deg,#e9d5ff,#818cf8)";
+                      img.style.opacity = "0.9";
+                      img.removeAttribute("src");
+                      img.removeAttribute("srcset");
+                    }}
                     className="aspect-square w-full bg-gray-900 object-cover"
                   />
                   <div className="truncate px-3 py-2 text-xs font-semibold text-gray-700">

@@ -3,7 +3,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   listThemes,
   createEvent,
-  uploadClip,
   runSync,
   getSoloVideo,
   type Theme,
@@ -16,13 +15,33 @@ import SoloResult from "~/components/SoloResult";
 const MOODS = ["serious", "playful", "formal", "educational"];
 const FILTERS = ["none", "warm", "cool", "vintage", "bw", "cinematic"];
 
-function readAsDataURL(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error("read failed"));
-    reader.readAsDataURL(file);
-  });
+/**
+ * Upload a single file to the streaming multipart endpoint (`/api/upload`) —
+ * raw bytes in the body, no base64, so large/long real-phone videos upload
+ * reliably. Mirrors the `clip` shape `uploadClip` returned.
+ */
+type UploadResp = {
+  ok: boolean;
+  message?: string;
+  clip?: Clip;
+  featuresOk?: boolean;
+};
+async function uploadClipMultipart(args: {
+  event_id: string;
+  file: File;
+  mediaType: "photo" | "video";
+}): Promise<UploadResp> {
+  const fd = new FormData();
+  fd.append("event_id", args.event_id);
+  fd.append("media_type", args.mediaType);
+  fd.append("filename", args.file.name);
+  if (args.file.type) fd.append("content_type", args.file.type);
+  fd.append("file", args.file, args.file.name);
+  const res = await fetch("/api/upload", { method: "POST", body: fd });
+  if (!res.ok) {
+    return { ok: false, message: "Upload failed — please retry." };
+  }
+  return (await res.json()) as UploadResp;
 }
 
 function Toggle({
@@ -168,20 +187,17 @@ function SoloPage() {
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
         setProgress(`Uploading ${i + 1} of ${files.length}…`);
-        const dataUrl = await readAsDataURL(f);
-        const b64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
         const mediaType = f.type.startsWith("image/") ? "photo" : "video";
-        const up = await uploadClip({
-          data: {
-            event_id: ev.id,
-            uploader: "You",
-            filename: f.name,
-            content_type: f.type || undefined,
-            media_type: mediaType,
-            data_base64: b64,
-          },
+        const up = await uploadClipMultipart({
+          event_id: ev.id,
+          file: f,
+          mediaType,
         });
-        if (up.ok && up.clip) clips.push(up.clip);
+        if (!up.ok) {
+          setError(up.message || "Something went wrong uploading a file.");
+          return;
+        }
+        if (up.clip) clips.push(up.clip);
       }
       setProgress("Auto-composing your video…");
       const syncRes = await runSync({ data: { event_id: ev.id } });
