@@ -125,6 +125,65 @@ export async function solveEventSync(eventId: string): Promise<SolveOutput> {
   return out;
 }
 
+/**
+ * Compose a SOLO event into a private sequential "finished video" WITHOUT any
+ * audio alignment.
+ *
+ * Solo is one user's clips in a sequence — there is nothing to align (no shared
+ * moment), so requiring audio-alignment is wrong. Unlike `solveEventSync` (which
+ * is for COLLABORATIVE multi-angle events and drops any clip that can't be
+ * aligned by shared audio), this simply walks the user's own media in upload
+ * order and lays it out back-to-back on the timeline:
+ *   - videos get sequential offsets (0, dur₁, dur₁+dur₂, …)
+ *   - photos don't carry a machine-duration yet, so they aren't given offsets
+ *     here — they're rendered as ~3s slideshow slots by the result page.
+ * No clip is ever "dropped" for lacking audio. Collaborative events never reach
+ * this path — they keep true audio alignment via `solveEventSync`.
+ */
+export async function composeSoloSync(eventId: string): Promise<SolveOutput> {
+  const clips = await query<{ id: string; media_type: string; s3_or_storage_key: string | null }>(
+    `select id, media_type, s3_or_storage_key
+       from clips where event_id = $1 order by created_at, id`,
+    [eventId]
+  );
+
+  const entries: SyncEntry[] = [];
+  const dropped: string[] = [];
+  let timeline = 0;
+  for (const c of clips) {
+    if (c.media_type !== "video") {
+      // Photos form the slideshow portion of the timeline — no offset here.
+      continue;
+    }
+    if (!c.s3_or_storage_key) {
+      dropped.push(c.id);
+      continue;
+    }
+    // Best-effort duration (cached audio features or a one-time decode). Solo
+    // clips are sequenced back-to-back regardless of whether audio is audible,
+    // so a silent clip is still included — it just falls back to ~3s.
+    let durationMs = 3000;
+    try {
+      const feats = await getClipFeatures(c.id, c.s3_or_storage_key);
+      durationMs = feats?.durationMs && feats.durationMs > 0 ? feats.durationMs : 3000;
+    } catch {
+      durationMs = 3000;
+    }
+    entries.push({
+      clip_id: c.id,
+      offset_ms: timeline,
+      duration_ms: durationMs,
+      confidence: 1,
+      mean_residual_ms: 0,
+    });
+    timeline += durationMs;
+  }
+
+  const out: SolveOutput = { entries, dropped, timeline_ms: timeline };
+  await persist(eventId, out);
+  return out;
+}
+
 async function persist(eventId: string, out: SolveOutput): Promise<void> {
   await query(
     `insert into event_sync (event_id, offsets, timeline_ms)

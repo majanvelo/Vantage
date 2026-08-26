@@ -1,5 +1,4 @@
 import { useMemo } from "react";
-import AlignedPlayback from "./AlignedPlayback";
 import type { Event, Clip, Theme } from "~/lib/vantage";
 import type { SoloVideoSync } from "~/lib/vantage";
 
@@ -37,7 +36,6 @@ function Chip({ children }: { children: React.ReactNode }) {
 export default function SoloResult({
   event,
   clips,
-  sync,
   themes,
 }: {
   event: Event;
@@ -61,7 +59,6 @@ export default function SoloResult({
 
   const videos = useMemo(() => clips.filter((c) => c.media_type === "video"), [clips]);
   const photos = useMemo(() => clips.filter((c) => c.media_type === "photo"), [clips]);
-  const hasVideos = videos.length > 0;
 
   return (
     <div className="mx-auto w-full max-w-5xl px-5 py-10">
@@ -111,24 +108,35 @@ export default function SoloResult({
 
       {/* Auto-composed preview */}
       <div className="mt-8 space-y-8">
-        <section>
-          <h2 className="text-lg font-bold text-gray-900">Auto-composed preview</h2>
-          <p className="mt-1 text-sm text-gray-500">
-            {hasVideos
-              ? "Your videos are locked to one timeline below; photos are placed as slideshow slots after them."
-              : "Everything below is your composition's timeline, shown private to you."}
-          </p>
-          {hasVideos ? (
-            <div className="mt-4">
-              <AlignedPlayback clips={videos} eventId={event.id} />
-            </div>
-          ) : (
-            <p className="mt-4 rounded-2xl border border-dashed border-gray-200 bg-gray-50 px-5 py-4 text-sm text-gray-500">
-              Add a video clip to get aligned playback here. Your photos still form the
-              timeline below.
+        {videos.length > 0 && (
+          <section>
+            <h2 className="text-lg font-bold text-gray-900">Your video clips</h2>
+            <p className="mt-1 text-sm text-gray-500">
+              Your {videos.length} video{videos.length === 1 ? "" : "s"} are laid out
+              one after another on your timeline, in the order you added them — no
+              editing needed.
             </p>
-          )}
-        </section>
+            <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+              {videos.map((v, i) => (
+                <div
+                  key={v.id}
+                  className="overflow-hidden rounded-2xl border border-gray-200 bg-gray-50"
+                >
+                  <span className="px-3 pt-2 text-xs font-bold text-fuchsia-600">
+                    Clip {i + 1} · {v.filename}
+                  </span>
+                  <video
+                    src={`/${v.s3_or_storage_key}`}
+                    controls
+                    preload="metadata"
+                    playsInline
+                    className="mt-2 aspect-video w-full bg-black object-contain"
+                  />
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
 
         {/* Photos on the timeline */}
         {photos.length > 0 && (
@@ -169,6 +177,12 @@ export default function SoloResult({
               ))}
             </div>
           </section>
+        )}
+
+        {videos.length === 0 && photos.length === 0 && (
+          <p className="rounded-2xl border border-dashed border-gray-200 bg-gray-50 px-5 py-4 text-sm text-gray-500">
+            Nothing to show yet.
+          </p>
         )}
       </div>
 

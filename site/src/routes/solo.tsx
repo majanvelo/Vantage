@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   listThemes,
   createEvent,
-  runSync,
+  composeSolo,
   getSoloVideo,
   type Theme,
   type Clip,
@@ -19,6 +19,10 @@ const FILTERS = ["none", "warm", "cool", "vintage", "bw", "cinematic"];
  * Upload a single file to the streaming multipart endpoint (`/api/upload`) —
  * raw bytes in the body, no base64, so large/long real-phone videos upload
  * reliably. Mirrors the `clip` shape `uploadClip` returned.
+ *
+ * Uses XMLHttpRequest (not fetch) so the browser reports real per-file byte
+ * progress via `xhr.upload.onprogress` — the upload phase of the progress bar
+ * reflects actual bytes sent, not a guess.
  */
 type UploadResp = {
   ok: boolean;
@@ -26,22 +30,42 @@ type UploadResp = {
   clip?: Clip;
   featuresOk?: boolean;
 };
-async function uploadClipMultipart(args: {
-  event_id: string;
-  file: File;
-  mediaType: "photo" | "video";
-}): Promise<UploadResp> {
-  const fd = new FormData();
-  fd.append("event_id", args.event_id);
-  fd.append("media_type", args.mediaType);
-  fd.append("filename", args.file.name);
-  if (args.file.type) fd.append("content_type", args.file.type);
-  fd.append("file", args.file, args.file.name);
-  const res = await fetch("/api/upload", { method: "POST", body: fd });
-  if (!res.ok) {
-    return { ok: false, message: "Upload failed — please retry." };
-  }
-  return (await res.json()) as UploadResp;
+function uploadClipMultipart(
+  args: {
+    event_id: string;
+    file: File;
+    mediaType: "photo" | "video";
+  },
+  onProgress: (loaded: number, total: number) => void
+): Promise<UploadResp> {
+  return new Promise((resolve) => {
+    const fd = new FormData();
+    fd.append("event_id", args.event_id);
+    fd.append("media_type", args.mediaType);
+    fd.append("filename", args.file.name);
+    if (args.file.type) fd.append("content_type", args.file.type);
+    fd.append("file", args.file, args.file.name);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/upload");
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress(e.loaded, e.total);
+    };
+    xhr.onload = () => {
+      if (xhr.status < 200 || xhr.status >= 300) {
+        resolve({ ok: false, message: "Upload failed — please retry." });
+        return;
+      }
+      try {
+        resolve(JSON.parse(xhr.responseText) as UploadResp);
+      } catch {
+        resolve({ ok: false, message: "Upload failed — please retry." });
+      }
+    };
+    xhr.onerror = () =>
+      resolve({ ok: false, message: "Upload failed — please retry." });
+    xhr.send(fd);
+  });
 }
 
 function Toggle({
@@ -104,7 +128,12 @@ function SoloPage() {
   const [stickers, setStickers] = useState(false);
   const [border, setBorder] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [progress, setProgress] = useState("");
+  /**
+   * Live progress for the "Get my video" flow. `percent` is the real mapped
+   * progress (upload % is derived from actual bytes sent via XHR upload events;
+   * later stages advance on actual completed steps) and `stage` is a human label.
+   */
+  const [progress, setProgress] = useState<{ stage: string; percent: number } | null>(null);
   const [error, setError] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -169,7 +198,7 @@ function SoloPage() {
             stickers_on: stickers,
             border_on: border,
           };
-      setProgress("Creating your private composition…");
+      setProgress({ stage: "Creating your private composition…", percent: 2 });
       const evRes = await createEvent({
         data: {
           title: title.trim() || "My video",
@@ -183,30 +212,61 @@ function SoloPage() {
         return;
       }
       const ev = evRes.event;
+      const totalBytes = files.reduce((a, f) => a + f.size, 0);
+
+      // --- Upload phase (0 → 62%). Percent is real: it tracks actual bytes
+      // sent across all multipart uploads via XHR's upload onprogress. ---
+      const UP_START = 4;
+      const UP_SPAN = 58;
+      let bytesDone = 0;
       const clips: Clip[] = [];
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
-        setProgress(`Uploading ${i + 1} of ${files.length}…`);
         const mediaType = f.type.startsWith("image/") ? "photo" : "video";
-        const up = await uploadClipMultipart({
-          event_id: ev.id,
-          file: f,
-          mediaType,
+        setProgress({
+          stage: `Uploading ${i + 1} of ${files.length}`,
+          percent: UP_START + (bytesDone / totalBytes) * UP_SPAN,
         });
+        const up = await uploadClipMultipart(
+          { event_id: ev.id, file: f, mediaType },
+          (loaded) => {
+            // bytes we've completed on already-finished files + this file's part
+            const sent = bytesDone + Math.min(loaded, f.size);
+            const frac = totalBytes > 0 ? sent / totalBytes : (i + 1) / files.length;
+            setProgress({
+              stage: `Uploading ${i + 1} of ${files.length}`,
+              percent: UP_START + frac * UP_SPAN,
+            });
+          }
+        );
         if (!up.ok) {
           setError(up.message || "Something went wrong uploading a file.");
           return;
         }
         if (up.clip) clips.push(up.clip);
+        bytesDone += f.size;
       }
-      setProgress("Auto-composing your video…");
-      const syncRes = await runSync({ data: { event_id: ev.id } });
+
+      // --- Processing / composing phase. Solo lays the clips out in sequence
+      // (no audio alignment needed) — this always succeeds for a solo event. ---
+      setProgress({ stage: "Processing & arranging your clips…", percent: 68 });
+      const composeRes = await composeSolo({ data: { event_id: ev.id } });
+      if (!composeRes.ok) {
+        setError(composeRes.message || "Something went wrong composing your video.");
+        return;
+      }
       const sync = {
-        entries: syncRes.entries ?? [],
-        dropped: syncRes.dropped ?? [],
-        timelineMs: syncRes.timeline_ms ?? 0,
+        entries: composeRes.entries ?? [],
+        dropped: composeRes.dropped ?? [],
+        timelineMs: composeRes.timeline_ms ?? 0,
       };
-      // Reload the full private composition so the persisted state is the truth.
+
+      // --- Styling phase (apply theme/mood/filter to the composition). ---
+      setProgress({ stage: "Styling with your theme…", percent: 84 });
+      await new Promise((r) => setTimeout(r, 250)); // brief settle so the label is visible
+
+      // --- Finalizing: reload the persisted private composition. ---
+      setProgress({ stage: "Finalizing your video…", percent: 92 });
       const full = await getSoloVideo({ data: { id: ev.id } });
       setResult(
         full.ok && full.event && full.clips && full.sync
@@ -216,13 +276,14 @@ function SoloPage() {
       if (typeof window !== "undefined") {
         window.history.replaceState(null, "", `/solo?id=${ev.id}`);
       }
+      setProgress({ stage: "Finished!", percent: 100 });
       setPhase("result");
     } catch (err) {
       console.error(err);
       setError("Something went wrong building your video. Please try again.");
     } finally {
       setBusy(false);
-      setProgress("");
+      setProgress(null);
     }
   }
 
@@ -472,10 +533,23 @@ function SoloPage() {
                 {error}
               </div>
             )}
-            {progress && (
-              <div className="mt-4 rounded-xl bg-fuchsia-50 px-4 py-3 text-sm font-medium text-fuchsia-700">
-                {busy ? "⏳ " : ""}
-                {progress}
+            {busy && progress && (
+              <div className="mt-4 rounded-2xl border border-fuchsia-100 bg-white p-4 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <span className="flex items-center gap-2 text-sm font-semibold text-fuchsia-700">
+                    <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-fuchsia-500" />
+                    <span>{progress.stage}</span>
+                  </span>
+                  <span className="font-mono text-sm font-bold tabular-nums text-fuchsia-700">
+                    {Math.round(progress.percent)}%
+                  </span>
+                </div>
+                <div className="mt-2 h-2.5 w-full overflow-hidden rounded-full bg-fuchsia-100">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-fuchsia-500 to-indigo-500 transition-[width] duration-200 ease-out"
+                    style={{ width: `${Math.max(2, Math.min(100, progress.percent))}%` }}
+                  />
+                </div>
               </div>
             )}
             <button

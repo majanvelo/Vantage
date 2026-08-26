@@ -467,6 +467,37 @@ export const runSync = createServerFn({ method: "POST" }).handler(
 );
 
 // ---------------------------------------------------------------------------
+// POST /api/events/solo/compose  → lay a SOLO event's own clips out in upload
+// order with NO audio alignment. Solo is one user's media in a sequence, so
+// there is nothing to align; this always produces a successful composition
+// (never an alignment-failed / dropped solve). Collaborative events keep true
+// audio alignment via `runSync`.
+// ---------------------------------------------------------------------------
+export const composeSolo = createServerFn({ method: "POST" }).handler(
+  async ({ data }: { data: { event_id?: unknown } }): Promise<SyncResult> => {
+    await ensureSchema();
+    const eventId = typeof data?.event_id === "string" ? data.event_id : "";
+    if (!eventId) return error("Missing event id.");
+    // Only solo events are composed this way.
+    const evs = await query(`select id from events where id = $1 and mode = 'solo'`, [eventId]);
+    if (evs.length === 0) return error("Solo video not found.");
+    const { composeSoloSync } = await import("./sync/service");
+    try {
+      const out = await composeSoloSync(eventId);
+      return {
+        ok: true as const,
+        entries: out.entries,
+        dropped: out.dropped,
+        timeline_ms: out.timeline_ms,
+      };
+    } catch (e) {
+      console.error("sync: solo compose failed", e);
+      return { ok: false as const, message: "Something went wrong composing your video." };
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
 // GET /api/events/:id/sync  → return the stored alignment (no heavy work). The
 // page uses this to load existing offsets without re-solving.
 // ---------------------------------------------------------------------------
