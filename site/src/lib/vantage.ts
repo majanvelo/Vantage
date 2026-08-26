@@ -154,6 +154,60 @@ export const getEvent = createServerFn({ method: "GET" }).handler(
 );
 
 // ---------------------------------------------------------------------------
+// GET a SOLO video by its private id (no share code, mode = 'solo' only).
+// Solo is the private single-user flow: the event id is a UUID and is never
+// exposed on any share path. If the id doesn't belong to a solo event it is
+// treated as not found, so solo compositions can never be reached through the
+// collaborative /e/:code route (which is also filtered to mode='collaborative').
+// ---------------------------------------------------------------------------
+export type SoloVideoSync = {
+  entries: SyncEntryDto[];
+  dropped: string[];
+  timelineMs: number;
+};
+export type SoloVideoResult = {
+  ok: boolean;
+  message?: string;
+  event?: Event;
+  clips?: Clip[];
+  sync?: SoloVideoSync;
+};
+export const getSoloVideo = createServerFn({ method: "GET" }).handler(
+  async ({ data }: { data: { id?: unknown } }): Promise<SoloVideoResult> => {
+    await ensureSchema();
+    const id = typeof data?.id === "string" ? data.id : "";
+    if (!id) return { ok: false as const, message: "Missing video id." };
+    const rows = await query<Event>(
+      `select id, title, mode, status, theme_id, prefs, owner, share_code, created_at
+         from events where id = $1 and mode = 'solo'`,
+      [id]
+    );
+    if (rows.length === 0) return { ok: false as const, message: "Solo video not found." };
+    const ev = rows[0];
+    const clips = await query<Clip>(
+      `select id, event_id, uploader, filename, content_type, size_bytes::text as size_bytes,
+              media_type, captured_at, s3_or_storage_key, created_at
+         from clips where event_id = $1 order by created_at`,
+      [id]
+    );
+    let sync: SoloVideoSync = { entries: [], dropped: [], timelineMs: 0 };
+    const srows = await query<{ offsets: unknown; timeline_ms: number }>(
+      `select offsets, timeline_ms from event_sync where event_id = $1`,
+      [id]
+    );
+    if (srows.length) {
+      const o = (srows[0].offsets ?? {}) as { entries?: SyncEntryDto[]; dropped?: string[] };
+      sync = {
+        entries: o.entries ?? [],
+        dropped: o.dropped ?? [],
+        timelineMs: srows[0].timeline_ms ?? 0,
+      };
+    }
+    return { ok: true as const, event: ev, clips, sync };
+  }
+);
+
+// ---------------------------------------------------------------------------
 // GET by central share code (the "open the link" path). Returns the event +
 // pool so a visitor can drop clips with zero account.
 // ---------------------------------------------------------------------------
@@ -164,7 +218,7 @@ export const getEventByCode = createServerFn({ method: "GET" }).handler(
     if (!code) return error("Missing share code.");
     const rows = await query<Event>(
       `select id, title, mode, status, theme_id, prefs, owner, share_code, created_at
-         from events where share_code = $1`,
+         from events where share_code = $1 and mode = 'collaborative'`,
       [code]
     );
     if (rows.length === 0) return error("That link isn't valid — no event found for it.");
@@ -191,7 +245,7 @@ export const joinEvent = createServerFn({ method: "POST" }).handler(
     const code = typeof data?.code === "string" ? data.code.trim().toUpperCase() : "";
     if (!code) return error("Missing share code.");
     const evs = await query<Event>(
-      `select id, title, mode, theme_id from events where share_code = $1`,
+      `select id, title, mode, theme_id from events where share_code = $1 and mode = 'collaborative'`,
       [code]
     );
     if (evs.length === 0) return error("That link isn't valid — no event found for it.");

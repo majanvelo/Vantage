@@ -48,8 +48,14 @@ function Nav() {
           Vantage
         </a>
         <a
+          href="/solo"
+          className="rounded-full bg-gradient-to-r from-fuchsia-500 to-indigo-500 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:opacity-90"
+        >
+          Make a solo video
+        </a>
+        <a
           href="/app/create"
-          className="rounded-full bg-gray-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-gray-700"
+          className="rounded-full border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 transition hover:bg-gray-50"
         >
           Start an event
         </a>
@@ -90,10 +96,16 @@ function Hero() {
           </p>
           <div className="mt-8 flex flex-col items-center gap-4 sm:flex-row sm:justify-center lg:justify-start">
             <a
-              href="/app/create"
+              href="/solo"
               className="w-full sm:w-auto rounded-full bg-gradient-to-r from-fuchsia-500 to-indigo-500 px-7 py-3.5 text-center text-base font-semibold text-white shadow-lg shadow-fuchsia-500/25 transition hover:opacity-90"
             >
-              Start an event — it&apos;s free
+              Make a solo video
+            </a>
+            <a
+              href="/app/create"
+              className="w-full sm:w-auto rounded-full border border-gray-300 px-7 py-3.5 text-center text-base font-semibold text-gray-700 transition hover:bg-gray-50"
+            >
+              Start a shared event
             </a>
             <a
               href="#how-it-works"
