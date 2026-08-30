@@ -3,12 +3,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   listThemes,
   createEvent,
-  composeSolo,
+  startSoloRender,
   getSoloVideo,
   type Theme,
   type Clip,
   type Event,
   type SoloVideoSync,
+  type SoloVideoRenderInfo,
 } from "~/lib/vantage";
 import SoloResult from "~/components/SoloResult";
 
@@ -109,6 +110,7 @@ type ResultData = {
   event: Event;
   clips: Clip[];
   sync: SoloVideoSync;
+  render?: SoloVideoRenderInfo;
 };
 
 function SoloPage() {
@@ -149,7 +151,7 @@ function SoloPage() {
       getSoloVideo({ data: { id } })
         .then((res) => {
           if (res.ok && res.event && res.clips && res.sync) {
-            setResult({ event: res.event, clips: res.clips, sync: res.sync });
+            setResult({ event: res.event, clips: res.clips, sync: res.sync, render: res.render });
             setPhase("result");
             return;
           }
@@ -175,6 +177,38 @@ function SoloPage() {
         ...prev,
         ...incoming.filter((f) => !names.has(`${f.name}:${f.size}`)),
       ];
+    });
+  }
+
+  /**
+   * Poll the server's render-status endpoint while the ffmpeg render runs in
+   * the background. Returns the live stage/% so the bar keeps climbing with real
+   * work completed — it never sits frozen on one number. Resolves when the
+   * render reports done (or an error).
+   */
+  function pollRenderStatus(
+    eventId: string,
+    onProgress: (p: { stage: string; percent: number }) => void
+  ): Promise<{ ok: boolean; done: boolean; error?: string }> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const tick = async () => {
+        if (settled) return;
+        try {
+          const res = await fetch(`/api/solo/render-status?event_id=${encodeURIComponent(eventId)}`);
+          const data = await res.json();
+          onProgress({ stage: data.stage ?? "Processing your clips…", percent: Number(data.percent ?? 68) });
+          if (data.done) {
+            settled = true;
+            resolve({ ok: !data.error, done: true, error: data.error ?? undefined });
+            return;
+          }
+        } catch {
+          // transient poll failure — keep trying
+        }
+        if (!settled) setTimeout(tick, 700);
+      };
+      setTimeout(tick, 400);
     });
   }
 
@@ -247,31 +281,29 @@ function SoloPage() {
         bytesDone += f.size;
       }
 
-      // --- Processing / composing phase. Solo lays the clips out in sequence
-      // (no audio alignment needed) — this always succeeds for a solo event. ---
-      setProgress({ stage: "Processing & arranging your clips…", percent: 68 });
-      const composeRes = await composeSolo({ data: { event_id: ev.id } });
-      if (!composeRes.ok) {
-        setError(composeRes.message || "Something went wrong composing your video.");
+      // --- Render phase. Start the real ffmpeg render (it runs in the
+      // background server-side), then poll for live stage/% so the progress bar
+      // advances continuously through "Processing → Rendering photo i of N →
+      // Finalizing → Done" with no silent freeze. ---
+      setProgress({ stage: "Processing your clips…", percent: 68 });
+      const startRes = await startSoloRender({ data: { event_id: ev.id } });
+      if (!startRes.ok) {
+        setError(startRes.message || "Something went wrong rendering your video.");
         return;
       }
-      const sync = {
-        entries: composeRes.entries ?? [],
-        dropped: composeRes.dropped ?? [],
-        timelineMs: composeRes.timeline_ms ?? 0,
-      };
+      const poll = await pollRenderStatus(ev.id, (p) => setProgress(p));
+      if (!poll.ok || poll.error) {
+        setError(poll.error || "Something went wrong rendering your video. Please try again.");
+        return;
+      }
 
-      // --- Styling phase (apply theme/mood/filter to the composition). ---
-      setProgress({ stage: "Styling with your theme…", percent: 84 });
-      await new Promise((r) => setTimeout(r, 250)); // brief settle so the label is visible
-
-      // --- Finalizing: reload the persisted private composition. ---
-      setProgress({ stage: "Finalizing your video…", percent: 92 });
+      // --- Done: reload the persisted private composition (which now carries
+      // the rendered finished-video marker). ---
       const full = await getSoloVideo({ data: { id: ev.id } });
       setResult(
         full.ok && full.event && full.clips && full.sync
-          ? { event: full.event, clips: full.clips, sync: full.sync }
-          : { event: ev, clips, sync }
+          ? { event: full.event, clips: full.clips, sync: full.sync, render: full.render }
+          : { event: ev, clips, sync: { entries: [], dropped: [], timelineMs: 0 } }
       );
       if (typeof window !== "undefined") {
         window.history.replaceState(null, "", `/solo?id=${ev.id}`);
@@ -296,7 +328,15 @@ function SoloPage() {
   }
 
   if (phase === "result" && result) {
-    return <SoloResult event={result.event} clips={result.clips} sync={result.sync} themes={themes} />;
+    return (
+      <SoloResult
+        event={result.event}
+        clips={result.clips}
+        sync={result.sync}
+        themes={themes}
+        render={result.render}
+      />
+    );
   }
 
   return (

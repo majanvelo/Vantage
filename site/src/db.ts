@@ -157,6 +157,21 @@ export async function ensureSchema(): Promise<void> {
     )
   `);
 
+  // A finished render of an event's finished MP4 (the rendered file lives at
+  // uploads/<eventId>/finished.mp4). Persisting the marker makes the finished
+  // video durable — reopening the private link shows the rendered MP4 without
+  // re-rendering.
+  await query(`
+    create table if not exists renders (
+      event_id     uuid primary key references events(id) on delete cascade,
+      status       text not null default 'pending' check (status in ('pending','done','error')),
+      finished_key text,
+      error        text,
+      started_at   timestamptz not null default now(),
+      updated_at   timestamptz not null default now()
+    )
+  `);
+
   // Starter theme catalog (Phase-1 selection; is_plus marks the Plus-tier packs).
   const themes: Array<[string, string, boolean, number]> = [
     ["vacation", "Vacation", false, 1],

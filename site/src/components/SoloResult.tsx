@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import type { Event, Clip, Theme } from "~/lib/vantage";
-import type { SoloVideoSync } from "~/lib/vantage";
+import type { SoloVideoSync, SoloVideoRenderInfo } from "~/lib/vantage";
 
 const MOOD_LABEL: Record<string, string> = {
   serious: "Serious",
@@ -37,12 +37,15 @@ export default function SoloResult({
   event,
   clips,
   themes,
+  render,
 }: {
   event: Event;
   clips: Clip[];
   sync: SoloVideoSync;
   themes: Theme[];
+  render?: SoloVideoRenderInfo;
 }) {
+  const finishedUrl = render?.status === "done" ? render.url : null;
   const themeName =
     themes.find((t) => t.id === event.theme_id)?.display_name ?? null;
   const prefs = useMemo(
@@ -103,6 +106,58 @@ export default function SoloResult({
             Styling (music track, captions, frames &amp; stickers matched to this theme) is
             applied when the video is rendered out — Phase 3 of the pipeline.
           </p>
+        )}
+      </div>
+
+      {/* Finished video — the real rendered MP4 */}
+      <div className="mt-8 rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+        {finishedUrl ? (
+          <>
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-bold text-gray-900">▶ Your finished video</h2>
+              <a
+                href={finishedUrl}
+                download="vantage.mp4"
+                className="rounded-full bg-fuchsia-600 px-4 py-1.5 text-xs font-bold text-white shadow transition hover:bg-fuchsia-700"
+              >
+                ⬇ Download
+              </a>
+            </div>
+            <video
+              key={finishedUrl}
+              src={finishedUrl}
+              controls
+              autoPlay
+              playsInline
+              className="mt-4 aspect-video w-full rounded-xl bg-black object-contain"
+              preload="auto"
+            />
+            <p className="mt-3 text-xs text-gray-400">
+              Your {clips.length} upload{clips.length === 1 ? "" : "s"} baked into one
+              playable video — Ken Burns motion, color filter, and sequential cut.
+            </p>
+          </>
+        ) : render?.status === "error" ? (
+          <div className="rounded-2xl border border-red-200 bg-red-50 px-5 py-4">
+            <h2 className="text-base font-bold text-red-800">Your video couldn&apos;t be rendered</h2>
+            <p className="mt-1 text-sm text-red-700">
+              {render.error || "An error occurred while rendering. Please try again."}
+            </p>
+          </div>
+        ) : render?.status === "pending" ? (
+          <div className="flex items-center gap-4 rounded-2xl border border-amber-200 bg-amber-50 px-5 py-4">
+            <span className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-amber-500 border-t-transparent" />
+            <div>
+              <h2 className="text-base font-bold text-amber-900">Your video is being rendered</h2>
+              <p className="mt-0.5 text-sm text-amber-800">
+                The finished MP4 is being baked in the background. Reload in a moment to see it.
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div className="rounded-2xl border border-dashed border-gray-200 bg-gray-50 px-5 py-4 text-sm text-gray-500">
+            This composition hasn&apos;t been rendered to a finished video yet.
+          </div>
         )}
       </div>
 
@@ -188,12 +243,12 @@ export default function SoloResult({
 
       {/* Saved / render note */}
       <div className="mt-10 rounded-3xl border border-emerald-200 bg-emerald-50 p-6">
-        <h2 className="text-base font-bold text-emerald-900">✓ Your video is being made</h2>
+        <h2 className="text-base font-bold text-emerald-900">✓ Your finished video is saved</h2>
         <p className="mt-1.5 text-sm text-emerald-800">
-          Your composition (uploads + theme/style) is saved. The preview above is your
-          auto-composed result. When the render pipeline goes live, this exact composition
-          is turned into the downloadable MP4 with your theme&apos;s music, subtitles,
-          frames and stickers baked in.
+          Your clips were baked into one playable video with directional motion and your
+          chosen {finishedUrl ? "color filter" : "style"}. Reopen this private link anytime to
+          watch it again — it&apos;s stored, not regenerated. (Music, subtitles, frames and
+          stickers matched to a theme arrive with a licensed music library in a later phase.)
         </p>
         <p className="mt-3 text-xs text-emerald-700/80">
           🔒 Private &amp; solo — only you can open this via its private link. There is no

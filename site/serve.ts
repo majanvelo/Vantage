@@ -48,6 +48,27 @@ for (let attempt = 1; ; attempt++) {
           const { handleUploadRequest } = await import("./src/lib/uploadHandler");
           return handleUploadRequest(req);
         }
+        if (pathname === "/api/solo/render-status") {
+          // Polled by the solo page while the ffmpeg render runs in the
+          // background, so the progress bar never freezes. Returns live stage/%
+          // plus whether it's done (or errored).
+          const eventId = new URL(req.url).searchParams.get("event_id") ?? "";
+          const { getRenderProgress, elapsedSeconds } = await import("./src/lib/render");
+          const p = getRenderProgress(eventId);
+          const body = p
+            ? {
+                ok: true,
+                stage: p.stage,
+                percent: p.percent,
+                done: p.done,
+                error: p.error ?? null,
+                elapsed: elapsedSeconds(p.startedAt),
+              }
+            : { ok: true, stage: "Processing your clips…", percent: 68, done: false, error: null, elapsed: 0 };
+          return new Response(JSON.stringify(body), {
+            headers: { "content-type": "application/json" },
+          });
+        }
         if (pathname.startsWith("/uploads/")) {
           // Serve materialized clip files from <site>/uploads for browser playback.
           const file = Bun.file(import.meta.dir + pathname);

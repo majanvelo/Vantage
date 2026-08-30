@@ -165,12 +165,18 @@ export type SoloVideoSync = {
   dropped: string[];
   timelineMs: number;
 };
+export type SoloVideoRenderInfo = {
+  status: "none" | "pending" | "done" | "error";
+  url?: string; // /uploads/<eventId>/finished.mp4
+  error?: string;
+};
 export type SoloVideoResult = {
   ok: boolean;
   message?: string;
   event?: Event;
   clips?: Clip[];
   sync?: SoloVideoSync;
+  render?: SoloVideoRenderInfo;
 };
 export const getSoloVideo = createServerFn({ method: "GET" }).handler(
   async ({ data }: { data: { id?: unknown } }): Promise<SoloVideoResult> => {
@@ -203,7 +209,34 @@ export const getSoloVideo = createServerFn({ method: "GET" }).handler(
         timelineMs: srows[0].timeline_ms ?? 0,
       };
     }
-    return { ok: true as const, event: ev, clips, sync };
+
+    // Finished-render info: durable marker in the `renders` table (takes
+    // precedence), plus any in-flight progress for a render in this process.
+    let render: SoloVideoRenderInfo = { status: "none" };
+    const rrows = await query<{ status: string; finished_key: string | null; error: string | null }>(
+      `select status, finished_key, error from renders where event_id = $1`,
+      [id]
+    );
+    if (rrows.length > 0) {
+      const r = rrows[0];
+      if (r.status === "done" && r.finished_key) {
+        render = { status: "done", url: `/${r.finished_key}` };
+      } else if (r.status === "error") {
+        render = { status: "error", error: r.error ?? undefined };
+      } else {
+        render = { status: "pending" };
+      }
+    }
+    // If a render is mid-flight in this process, reflect that as pending.
+    const { getRenderProgress } = await import("./render");
+    const inflight = getRenderProgress(id);
+    if (inflight && render.status !== "done") {
+      render = render.status === "error"
+        ? render
+        : { status: inflight.done ? render.status : "pending" };
+    }
+
+    return { ok: true as const, event: ev, clips, sync, render };
   }
 );
 
@@ -494,6 +527,30 @@ export const composeSolo = createServerFn({ method: "POST" }).handler(
       console.error("sync: solo compose failed", e);
       return { ok: false as const, message: "Something went wrong composing your video." };
     }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// POST /api/events/solo/render  → START the real ffmpeg render that bakes a
+// solo event's media into ONE playable finished MP4, then return immediately.
+// The heavy render runs in the background in this same process; the client polls
+// GET /api/solo/render-status (via serve.ts) for live stage/% so the progress
+// bar never freezes on a silent awaited call. Idempotent: an already-rendered
+// event returns the existing file without re-rendering.
+// ---------------------------------------------------------------------------
+export type StartRenderResult = { ok: boolean; message?: string };
+export const startSoloRender = createServerFn({ method: "POST" }).handler(
+  async ({ data }: { data: { event_id?: unknown } }): Promise<StartRenderResult> => {
+    await ensureSchema();
+    const eventId = typeof data?.event_id === "string" ? data.event_id : "";
+    if (!eventId) return error("Missing event id.");
+    const evs = await query(`select id from events where id = $1 and mode = 'solo'`, [eventId]);
+    if (evs.length === 0) return error("Solo video not found.");
+    const { renderSoloVideo } = await import("./render");
+    // Fire-and-forget: the render continues in the background; progress is read
+    // via the status endpoint. We do NOT await the heavy work here.
+    void renderSoloVideo(eventId);
+    return { ok: true as const };
   }
 );
 
