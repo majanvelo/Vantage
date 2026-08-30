@@ -192,12 +192,22 @@ function SoloPage() {
   ): Promise<{ ok: boolean; done: boolean; error?: string }> {
     return new Promise((resolve) => {
       let settled = false;
+      // Safety timeout: if polling keeps returning not-done for ~120s (e.g. a
+      // render process died or a durable row is missing), stop polling so the
+      // page never spins forever — the caller falls back to getSoloVideo, which
+      // reads the authoritative durable renders table.
+      const deadline = Date.now() + 120_000;
       const tick = async () => {
         if (settled) return;
         try {
           const res = await fetch(`/api/solo/render-status?event_id=${encodeURIComponent(eventId)}`);
           const data = await res.json();
-          onProgress({ stage: data.stage ?? "Processing your clips…", percent: Number(data.percent ?? 68) });
+          onProgress({
+            stage: data.stage ?? "Processing your clips…",
+            percent: Number(data.percent ?? 0),
+          });
+          // Terminate on done:true regardless of the reported percent; surface
+          // any error so the page shows the error state, not a silent freeze.
           if (data.done) {
             settled = true;
             resolve({ ok: !data.error, done: true, error: data.error ?? undefined });
@@ -205,6 +215,13 @@ function SoloPage() {
           }
         } catch {
           // transient poll failure — keep trying
+        }
+        if (Date.now() >= deadline) {
+          settled = true;
+          // Timed out without "done" — bail to the durable-state fallback
+          // (getSoloVideo) rather than hanging forever.
+          resolve({ ok: true, done: false });
+          return;
         }
         if (!settled) setTimeout(tick, 700);
       };

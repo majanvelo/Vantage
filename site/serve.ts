@@ -53,18 +53,35 @@ for (let attempt = 1; ; attempt++) {
           // background, so the progress bar never freezes. Returns live stage/%
           // plus whether it's done (or errored).
           const eventId = new URL(req.url).searchParams.get("event_id") ?? "";
-          const { getRenderProgress, elapsedSeconds } = await import("./src/lib/render");
+          const { getRenderProgress, elapsedSeconds, getDurableRenderState } = await import("./src/lib/render");
           const p = getRenderProgress(eventId);
-          const body = p
-            ? {
-                ok: true,
-                stage: p.stage,
-                percent: p.percent,
-                done: p.done,
-                error: p.error ?? null,
-                elapsed: elapsedSeconds(p.startedAt),
-              }
-            : { ok: true, stage: "Processing your clips…", percent: 68, done: false, error: null, elapsed: 0 };
+          let body: Record<string, unknown>;
+          if (p) {
+            // Live render in flight — report real stage/%/done from the in-memory store.
+            body = {
+              ok: true,
+              stage: p.stage,
+              percent: p.percent,
+              done: p.done,
+              error: p.error ?? null,
+              elapsed: elapsedSeconds(p.startedAt),
+            };
+          } else {
+            // No live render in flight — reconcile against the DURABLE `renders`
+            // table (survives restarts / store resets), never a frozen default.
+            const d = await getDurableRenderState(eventId);
+            if (d.status === "done" && d.finished_key) {
+              // Finished and persisted — let the client's poll exit and show the video.
+              body = { ok: true, stage: "Done", percent: 100, done: true, error: null, url: `/${d.finished_key}`, elapsed: 0 };
+            } else if (d.status === "error") {
+              body = { ok: true, stage: "Error", percent: 0, done: true, error: d.error ?? "Something went wrong rendering your video.", elapsed: 0 };
+            } else {
+              // Truly nothing started and nothing durable — a "started but no
+              // progress yet" state; the client keeps polling. Never the
+              // misleading "68 / Processing" default.
+              body = { ok: true, stage: "Preparing your video…", percent: 0, done: false, error: null, elapsed: 0 };
+            }
+          }
           return new Response(JSON.stringify(body), {
             headers: { "content-type": "application/json" },
           });

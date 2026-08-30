@@ -52,6 +52,55 @@ export function getRenderProgress(eventId: string): RenderProgress | null {
   return progressMap.get(eventId) ?? null;
 }
 
+/**
+ * Durable render state from the `renders` table — the authoritative source of
+ * truth for whether an event's finished video exists (status=done + finished_key),
+ * failed (status=error + error), or was never rendered (pending / no row).
+ * Unlike the volatile in-memory `progressMap`, this survives restarts and
+ * process races, so the status endpoint can stop reporting a frozen default and
+ * instead reconcile against what actually happened.
+ */
+export type DurableRenderState = {
+  status: "pending" | "done" | "error" | null;
+  finished_key: string | null;
+  error: string | null;
+};
+
+export async function getDurableRenderState(
+  eventId: string
+): Promise<DurableRenderState> {
+  try {
+    const rows = await query<{
+      status: string;
+      finished_key: string | null;
+      error: string | null;
+    }>(
+      `select status, finished_key, error from renders where event_id = $1`,
+      [eventId]
+    );
+    if (rows.length === 0) {
+      return { status: null, finished_key: null, error: null };
+    }
+    const r = rows[0];
+    return {
+      status: (r.status as DurableRenderState["status"]) ?? null,
+      finished_key: r.finished_key,
+      error: r.error,
+    };
+  } catch (e) {
+    // A DB hiccup must never turn into a misleading "done". Return "no durable
+    // state" so the caller falls back to the not-started / keep-polling path.
+    console.error("render: durable state lookup failed", e);
+    return { status: null, finished_key: null, error: null };
+  }
+}
+
+/** Seed the in-memory progress map to done for an already-rendered event, so a
+ *  subsequent poll ("done") resolves instantly without re-rendering. */
+export function seedRenderDone(eventId: string) {
+  setProgress(eventId, { stage: "Done", percent: 100, done: true });
+}
+
 function setProgress(eventId: string, p: Partial<RenderProgress>) {
   const prev = progressMap.get(eventId) ?? {
     stage: "Processing your clips…",

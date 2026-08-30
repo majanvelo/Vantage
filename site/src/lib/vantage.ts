@@ -546,7 +546,15 @@ export const startSoloRender = createServerFn({ method: "POST" }).handler(
     if (!eventId) return error("Missing event id.");
     const evs = await query(`select id from events where id = $1 and mode = 'solo'`, [eventId]);
     if (evs.length === 0) return error("Solo video not found.");
-    const { renderSoloVideo } = await import("./render");
+    const { renderSoloVideo, getDurableRenderState, seedRenderDone } = await import("./render");
+    // Idempotent against durable state: if the finished render already exists,
+    // seed the in-memory progress to done and return immediately (no re-render),
+    // so the client's poll resolves "done" instantly.
+    const durable = await getDurableRenderState(eventId);
+    if (durable.status === "done" && durable.finished_key) {
+      seedRenderDone(eventId);
+      return { ok: true as const };
+    }
     // Fire-and-forget: the render continues in the background; progress is read
     // via the status endpoint. We do NOT await the heavy work here.
     void renderSoloVideo(eventId);
