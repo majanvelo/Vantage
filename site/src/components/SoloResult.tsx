@@ -38,12 +38,16 @@ export default function SoloResult({
   clips,
   themes,
   render,
+  onMakeAnother,
+  onRedo,
 }: {
   event: Event;
   clips: Clip[];
   sync: SoloVideoSync;
   themes: Theme[];
   render?: SoloVideoRenderInfo;
+  onMakeAnother: () => void;
+  onRedo: () => void;
 }) {
   const finishedUrl = render?.status === "done" ? render.url : null;
   const themeName =
@@ -75,6 +79,30 @@ export default function SoloResult({
           Vantage auto-composed your {clips.length} upload{clips.length === 1 ? "" : "s"} into
           one styled video — no editing needed. It&apos;s private to you; there&apos;s no
           shared pool and no share link.
+        </p>
+      </div>
+
+      {/* Back / Redo actions — two clear ways off the finished-video screen,
+          no page reload required. */}
+      <div className="mt-8">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-center">
+          <button
+            type="button"
+            onClick={onMakeAnother}
+            className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-fuchsia-500 to-indigo-500 px-6 py-3.5 text-base font-bold text-white shadow-lg shadow-fuchsia-500/25 transition hover:opacity-90"
+          >
+            ← Back to start / Make another video
+          </button>
+          <button
+            type="button"
+            onClick={onRedo}
+            className="inline-flex items-center justify-center gap-2 rounded-xl border border-gray-300 bg-white px-6 py-3.5 text-base font-semibold text-gray-700 transition hover:border-fuchsia-300 hover:text-fuchsia-700"
+          >
+            🎨 Change style &amp; redo
+          </button>
+        </div>
+        <p className="mt-2 text-center text-xs text-gray-400">
+          Start a brand-new video, or redo this one with different choices — no reload, no getting stuck.
         </p>
       </div>
 

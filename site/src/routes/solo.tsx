@@ -336,6 +336,59 @@ function SoloPage() {
     }
   }
 
+  /**
+   * "Back to start / Make another" — a brand-new solo upload. Clears every
+   * form field to defaults and starts over on the setup screen (no old media
+   * carried forward). Also clears the ?id= URL so the fresh form isn't tied to
+   * a previous event.
+   */
+  function handleMakeAnother() {
+    setTitle("");
+    setFiles([]);
+    setThemeId("");
+    setSystem(false);
+    setMood("playful");
+    setFilter("none");
+    setSubtitles(true);
+    setMusic(true);
+    setStickers(false);
+    setBorder(false);
+    setError("");
+    setProgress(null);
+    setResult(null);
+    setPhase("setup");
+    if (typeof window !== "undefined") {
+      window.history.replaceState(null, "", "/solo");
+    }
+  }
+
+  /**
+   * "Change style & redo" — return to the setup screen with the CURRENT upload
+   * preserved (files + the event's theme/toggles prefilled from the rendered
+   * event), so the user can tweak their choices and hit "Get my video" again to
+   * re-render. No page reload. For the fresh-upload path the File objects are
+   * still in state; for a /solo?id= reopen they can't be recovered from the
+   * server, so media starts empty but the style choices are prefilled.
+   */
+  function handleRedo() {
+    if (!result) return;
+    const prefs = (result.event.prefs ?? {}) as Record<string, unknown>;
+    setTitle(result.event.title ?? "");
+    // Keep existing `files` as-is: preserved in the fresh path, empty on reopen.
+    setThemeId(result.event.theme_id ?? "");
+    setSystem(prefs.system_does_everything === true);
+    setMood(String(prefs.story_mood ?? "playful"));
+    setFilter(String(prefs.filter ?? "none"));
+    setSubtitles(prefs.subtitles_on !== false);
+    setMusic(prefs.music_on !== false);
+    setStickers(prefs.stickers_on === true);
+    setBorder(prefs.border_on === true);
+    setError("");
+    setProgress(null);
+    setResult(null);
+    setPhase("setup");
+  }
+
   if (phase === "loading") {
     return (
       <div className="flex min-h-dvh items-center justify-center bg-white text-gray-500">
@@ -352,6 +405,8 @@ function SoloPage() {
         sync={result.sync}
         themes={themes}
         render={result.render}
+        onMakeAnother={handleMakeAnother}
+        onRedo={handleRedo}
       />
     );
   }
