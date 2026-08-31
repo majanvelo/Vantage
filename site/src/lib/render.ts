@@ -234,16 +234,31 @@ export async function renderSoloVideo(eventId: string): Promise<SoloRenderOutcom
           i % 2 === 0 // alternate zoom-in / zoom-out for variety
             ? "min(zoom+0.0015,1.15)"
             : "max(1.0015,1.15-0.0015*(on))";
-        const vf = [
-          `scale=${W}:${H}:force_original_aspect_ratio=increase`,
-          `crop=${W}:${H}`,
-          `zoompan=z='${zoompan}':d=${FRAME_COUNT}:s=${W}x${H}:fps=${FPS}`,
+        // Blurred-background ("fit") treatment so the ENTIRE photo is always
+        // visible regardless of its aspect ratio:
+        //   - Split the input into two branches.
+        //   - Background: scaled to COVER the full frame, then heavily blurred.
+        //   - Foreground: scaled to FIT inside 1280x720 (force_original_aspect_ratio
+        //     =decrease — the whole image stays, nothing is cropped away), centered
+        //     on top of the blurred fill via overlay=(W-w)/2:(H-h)/2.
+        //   - The Ken Burns pan/zoom + color filter are applied to the composited
+        //     result so motion still works and tall/portrait photos keep their bars
+        //     (no edge cropping).
+        const filterComplex = [
+          "[0:v]split=2[bg][fg]",
+          `[bg]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},boxblur=20:2[bgblur]`,
+          `[fg]scale=${W}:${H}:force_original_aspect_ratio=decrease[fgfit]`,
+          `[bgblur][fgfit]overlay=(W-w)/2:(H-h)/2,` +
+            `zoompan=z='${zoompan}':d=${FRAME_COUNT}:s=${W}x${H}:fps=${FPS}` +
+            (colorChain ? `,${colorChain}` : "") +
+            `,format=yuv420p,setdar=16/9[vout]`,
         ];
-        if (colorChain) vf.push(colorChain);
-        vf.push("format=yuv420p");
         await runFfmpeg([
+          "-loop", "1",
+          "-t", String(PHOTO_SECONDS + 1),
           "-i", absolutePath(c.s3_or_storage_key!),
-          "-vf", vf.join(","),
+          "-filter_complex", filterComplex.join(";"),
+          "-map", "[vout]",
           "-r", String(FPS),
           "-t", String(PHOTO_SECONDS),
           "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
