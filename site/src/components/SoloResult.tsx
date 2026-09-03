@@ -63,6 +63,7 @@ export default function SoloResult({
   const musicOn = prefs.music_on === true;
   const stickersOn = prefs.stickers_on === true;
   const borderOn = prefs.border_on === true;
+  const caption = typeof prefs.caption === "string" ? prefs.caption.trim() : "";
 
   const videos = useMemo(() => clips.filter((c) => c.media_type === "video"), [clips]);
   const photos = useMemo(() => clips.filter((c) => c.media_type === "photo"), [clips]);
@@ -126,6 +127,7 @@ export default function SoloResult({
               <Chip>{musicOn ? "Music on" : "No music"}</Chip>
               <Chip>{stickersOn ? "Stickers on" : "No stickers"}</Chip>
               <Chip>{borderOn ? "Border on" : "No border"}</Chip>
+              {caption && <Chip>✏️ Caption: {caption}</Chip>}
             </>
           )}
         </div>

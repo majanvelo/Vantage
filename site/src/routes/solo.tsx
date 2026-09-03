@@ -129,6 +129,7 @@ function SoloPage() {
   const [music, setMusic] = useState(true);
   const [stickers, setStickers] = useState(false);
   const [border, setBorder] = useState(false);
+  const [caption, setCaption] = useState("");
   const [busy, setBusy] = useState(false);
   /**
    * Live progress for the "Get my video" flow. `percent` is the real mapped
@@ -239,7 +240,7 @@ function SoloPage() {
     setBusy(true);
     setError("");
     try {
-      const prefs = system
+      const basePrefs = system
         ? { system_does_everything: true }
         : {
             story_mood: mood,
@@ -249,6 +250,11 @@ function SoloPage() {
             stickers_on: stickers,
             border_on: border,
           };
+      // The typed-in caption (owner decision) is stored on prefs.caption and
+      // baked onto the finished video by the renderer when non-empty.
+      const prefs = caption.trim()
+        ? { ...basePrefs, caption: caption.trim() }
+        : basePrefs;
       setProgress({ stage: "Creating your private composition…", percent: 2 });
       const evRes = await createEvent({
         data: {
@@ -353,6 +359,7 @@ function SoloPage() {
     setMusic(true);
     setStickers(false);
     setBorder(false);
+    setCaption("");
     setError("");
     setProgress(null);
     setResult(null);
@@ -383,6 +390,7 @@ function SoloPage() {
     setMusic(prefs.music_on !== false);
     setStickers(prefs.stickers_on === true);
     setBorder(prefs.border_on === true);
+    setCaption(typeof prefs.caption === "string" ? prefs.caption : "");
     setError("");
     setProgress(null);
     setResult(null);
@@ -638,6 +646,17 @@ function SoloPage() {
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               placeholder="My video"
+              className="mt-1.5 w-full rounded-xl border border-gray-300 px-4 py-2.5 text-gray-900 focus:border-fuchsia-500 focus:outline-none"
+            />
+            <label className="mt-4 block text-sm font-semibold text-gray-900">
+              Caption / subtitle text{" "}
+              <span className="font-normal text-gray-400">(optional)</span>
+            </label>
+            <input
+              value={caption}
+              onChange={(e) => setCaption(e.target.value)}
+              placeholder="e.g. Our summer trip ☀️"
+              maxLength={120}
               className="mt-1.5 w-full rounded-xl border border-gray-300 px-4 py-2.5 text-gray-900 focus:border-fuchsia-500 focus:outline-none"
             />
             {error && (
