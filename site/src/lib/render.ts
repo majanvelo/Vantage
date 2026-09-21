@@ -135,7 +135,17 @@ function runFfmpeg(args: string[]): Promise<void> {
     child.on("error", (e) => reject(e));
     child.on("close", (code) => {
       if (code === 0) resolve();
-      else reject(new Error(err.trim() || `ffmpeg exited with code ${code}`));
+      else {
+        // Include the argv so a render failure can be reproduced by hand.
+        const argv = args.join(" ");
+        reject(
+          new Error(
+            `${err.trim() || `ffmpeg exited with code ${code}`}${
+              process.env.FFMPEG_DEBUG ? `\nARGS: ${argv}` : ""
+            }`
+          )
+        );
+      }
     });
   });
 }
