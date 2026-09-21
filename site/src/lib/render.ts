@@ -441,6 +441,8 @@ const H = 720;
 const FPS = 25;
 const PHOTO_SECONDS = 3;
 const FRAME_COUNT = FPS * PHOTO_SECONDS; // zoompan d (frames per photo)
+/** Lavfi source of silence, used to give soundless segments a real audio track. */
+const SILENT_AUDIO_INPUT = "anullsrc=channel_layout=stereo:sample_rate=44100";
 
 /**
  * Render a solo event's clips into uploads/<eventId>/finished.mp4, persist the
@@ -546,12 +548,18 @@ export async function renderSoloVideo(eventId: string): Promise<SoloRenderOutcom
           "-loop", "1",
           "-t", String(PHOTO_SECONDS + 1),
           "-i", absolutePath(c.s3_or_storage_key!),
+          // Every segment MUST carry an audio stream, or the concat below drops
+          // audio for the WHOLE film (a photo-only first segment made the entire
+          // finished video silent). A photo has no sound, so give it silence.
+          "-f", "lavfi",
+          "-i", SILENT_AUDIO_INPUT,
           "-filter_complex", filterComplex.join(";"),
           "-map", "[vout]",
+          "-map", "1:a",
           "-r", String(FPS),
           "-t", String(PHOTO_SECONDS),
           "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
-          "-an",
+          "-c:a", "aac", "-ar", "44100", "-b:a", "128k", "-ac", "2",
           out,
         ]);
         segmentInputs.push(out);
@@ -577,12 +585,19 @@ export async function renderSoloVideo(eventId: string): Promise<SoloRenderOutcom
         ];
         if (colorChain) vf.push(colorChain);
         vf.push("format=yuv420p");
+        // A clip with no sound of its own (screen recording, muted export) still
+        // gets an audio track, so EVERY segment has the same v+a layout and the
+        // concat can never silently drop the film's own audio.
+        const clipHasAudio = await hasAudioStream(absolutePath(c.s3_or_storage_key!));
+        const clipArgs = ["-i", absolutePath(c.s3_or_storage_key!)];
+        if (!clipHasAudio) clipArgs.push("-f", "lavfi", "-i", SILENT_AUDIO_INPUT);
         await runFfmpeg([
-          "-i", absolutePath(c.s3_or_storage_key!),
+          ...clipArgs,
           "-vf", vf.join(","),
           "-r", String(FPS),
           "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
-          "-c:a", "aac", "-ar", "44100",
+          "-c:a", "aac", "-ar", "44100", "-b:a", "128k", "-ac", "2",
+          ...(clipHasAudio ? [] : ["-shortest"]),
           out,
         ]);
         segmentInputs.push(out);
