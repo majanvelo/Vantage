@@ -13,10 +13,11 @@
  *     concatenated in sequence, so photos + videos can share one finished file.
  *   - The color filter from event.prefs.filter (none/warm/cool/vintage/bw/
  *     cinematic) is mapped to ffmpeg color filters and applied at render time.
- *   - Music: only mixed in if a real bundled track EXISTS in the project. There
- *     is currently no licensed music library, so nothing is faked — pure-photo
- *     solo videos render silent (videos keep their own audio). A real licensed
- *     music library is a later Phase-3 piece.
+ *   - Music: a 100% SYNTHESIZED, original, non-copyright bed (see ./music.ts)
+ *     chosen by prefs.music_style (off | calm | upbeat | dreamy). It is a real
+ *     four-chord composition with an arpeggio and percussion — never a drone.
+ *     The bed is looped to the film's exact length and fade-in/out, then mixed
+ *     UNDER the video's own audio (or is the only track for photo-only films).
  *
  * Progress is written to an in-memory store (read by the status endpoint) as the
  * render runs so the page's progress bar never freezes, and the durable marker is
@@ -32,6 +33,13 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { query } from "~/db";
 import { absolutePath, uploadsRoot } from "~/lib/storage";
+import {
+  DEFAULT_MUSIC_STYLE,
+  autoMusicStyle,
+  isMusicStyle,
+  synthesizeMusicWav,
+  type MusicStyle,
+} from "./music";
 
 // ---------------------------------------------------------------------------
 // Progress store — in-memory so the status endpoint can report real stage/%
@@ -154,6 +162,26 @@ function ffprobeJson(args: string[]): Promise<any> {
   });
 }
 
+/**
+ * Duration of a file's FIRST VIDEO STREAM, or null. Preferred over the container
+ * duration for the film: it is the picture length that the finished video (and
+ * therefore its audio) must match exactly.
+ */
+async function ffprobeVideoDuration(filePath: string): Promise<number | null> {
+  try {
+    const info = await ffprobeJson([
+      "-select_streams", "v:0",
+      "-show_entries", "stream=duration",
+      "-show_entries", "format=duration",
+      "-i", filePath,
+    ]);
+    const d = Number(info?.streams?.[0]?.duration ?? info?.format?.duration);
+    return Number.isFinite(d) && d > 0 ? d : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Duration (seconds) of a media file, or null if it can't be read. */
 async function ffprobeDuration(filePath: string): Promise<number | null> {
   try {
@@ -183,69 +211,43 @@ async function hasAudioStream(filePath: string): Promise<boolean> {
 }
 
 // ---------------------------------------------------------------------------
-// Generated ORIGINAL background music.
+// Generated ORIGINAL background music (see ./music.ts for the composition).
 //
-// The owner-approved decision is GENERATED, ORIGINAL, non-copyright music: we
-// SYNTHESIZE a gentle ambient chord/pad bed with ffmpeg's `sine` source — a few
-// soft sine tones stacked into a chord, low-passed into a pad, with a slow
-// tremolo for gentle movement and fade in/out. This is produced programmatically
-// from pure frequencies — no samples, no library, no license required. We never
-// pull from an external source. The bed is mixed low UNDER the video's own audio
-// when the video has any, or is the solo track for pure-photo videos.
-//
-// Chords vary a little by theme_id (deterministic hash) for variety, but stay
-// simple/ambient so they read as a pleasant pad under the video.
+// The bed is a genuine four-chord progression with an arpeggio/melody and a
+// rhythm layer, synthesized from pure math — no samples, no library, no
+// licensing, no copyright risk. We synthesize ONE seamless loop per style and
+// let ffmpeg loop it to the film's exact duration (see finalizeSoloVideo), so
+// even an hour-long film costs only a few seconds of synthesis.
 // ---------------------------------------------------------------------------
-const PAD_CHORDS: number[][] = [
-  [220.0, 261.63, 329.63, 440.0], // A minor — calm
-  [196.0, 246.94, 293.66, 392.0], // G major — warm
-  [174.61, 220.0, 261.63, 349.23], // F major — soft
-  [164.81, 207.65, 246.94, 329.63], // E minor — mellow
-];
-
-function chordFor(themeId: string | null | undefined): number[] {
-  if (!themeId) return PAD_CHORDS[0];
-  let h = 7;
-  for (let i = 0; i < themeId.length; i++) h = (h * 31 + themeId.charCodeAt(i)) >>> 0;
-  return PAD_CHORDS[h % PAD_CHORDS.length];
-}
 
 /**
- * Synthesize a soft ambient bed of `duration` seconds to `outPath`. Each chord
- * tone is a sine at ~1/n amplitude (kept low so the stacked chord never clips),
- * mixed with normalize=0, low-passed into a pad, given a slow tremolo, gentle
- * fade in/out, and an overall low "under-video" gain.
+ * Resolve which music style to use from event prefs.
+ *   - prefs.music_style wins ("off"/"none" → no music at all)
+ *   - legacy prefs.music_on === false → no music (the old boolean toggle)
+ *   - "let the system do everything" → a style derived from the theme
+ *   - otherwise music is ON by default (Calm)
  */
-async function generateMusicBed(
-  outPath: string,
-  duration: number,
-  freqs: number[]
-): Promise<void> {
-  const n = freqs.length;
-  const amp = Number((0.72 / n).toFixed(4)); // stacked chord stays well under clipping
-  const inputs: string[] = [];
-  const sourceLabels: string[] = [];
-  freqs.forEach((f, i) => {
-    inputs.push("-f", "lavfi", "-i", `sine=frequency=${f}:sample_rate=44100`);
-    sourceLabels.push(`[${i}:a]volume=${amp}[t${i}]`);
-  });
-  const mix = freqs.map((_, i) => `[t${i}]`).join("") +
-    `amix=inputs=${n}:normalize=0,` +
-    `lowpass=f=850,` +
-    `tremolo=f=0.15:d=0.3,` +
-    `afade=t=in:st=0:d=1.5,` +
-    `afade=t=out:st=${Math.max(0.2, duration - 1.6)}:d=1.6,` +
-    `volume=2.0[bed]`;
-  const fc = sourceLabels.join(";") + ";" + mix;
-  await runFfmpeg([
-    ...inputs,
-    "-filter_complex", fc,
-    "-map", "[bed]",
-    "-t", String(duration),
-    "-ar", "44100",
-    "-ac", "2",
-    outPath,
-  ]);
+function resolveMusicStyle(
+  prefs: Record<string, unknown>,
+  themeId: string | null
+): MusicStyle | null {
+  const raw = prefs.music_style;
+  if (isMusicStyle(raw)) return raw;
+  if (typeof raw === "string") {
+    const v = raw.trim().toLowerCase();
+    if (v === "off" || v === "none" || v === "no" || v === "false") return null;
+  }
+  if (prefs.music_on === false) return null;
+  if (prefs.system_does_everything === true) {
+    const seed = themeId ?? (typeof prefs.story_mood === "string" ? prefs.story_mood : null);
+    return autoMusicStyle(seed);
+  }
+  return DEFAULT_MUSIC_STYLE;
+}
+
+/** Write a style's seamless loop WAV next to the render it belongs to. */
+async function writeMusicLoop(outPath: string, style: MusicStyle): Promise<void> {
+  await Bun.write(outPath, synthesizeMusicWav(style));
 }
 
 /** Escape text for use inside an ffmpeg drawtext `text=` option value. */
@@ -268,11 +270,22 @@ const CAPTION_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
 type FinalizeOptions = {
   borderOn: boolean;
   caption: string | null; // non-empty typed caption to overlay, else null
-  musicOn: boolean;
+  musicStyle: MusicStyle | null; // null = no music
   themeId: string | null;
 };
 
-async function finalizeSoloVideo(
+/**
+ * The final "post style" pass: bake the user's locked look onto the concatenated
+ * film — (a) BORDER, (b) typed-in CAPTION, (c) GENERATED MUSIC bed. Re-encodes
+ * `concatPath` → `finishedPath` as one playable 1280x720@25 h264+aac MP4.
+ *
+ * LENGTH IS AUTHORITATIVE: the film's real video duration is probed first and
+ * both the music bed and the muxed output are explicitly cut to it (`-t`), so
+ * the finished container can never run on with a silent audio tail (the old bug
+ * produced a 50s container for a 6s film). The bed also gets a fade-in/out sized
+ * to the film, so short films still open and close gracefully.
+ */
+export async function finalizeSoloVideo(
   concatPath: string,
   finishedPath: string,
   opts: FinalizeOptions
@@ -295,39 +308,65 @@ async function finalizeSoloVideo(
     );
   }
 
-  // The video duration drives both the bed length and the final output cap.
-  // Probe the concat FIRST (the video stream length is what matters for the
-  // finished film), and fall back to a probe of the container/stream.
-  const videoDur = await ffprobeDuration(concatPath);
+  // The film's real length: probe the VIDEO stream of the concat (fall back to
+  // the container duration). Everything below is cut to this number.
+  const probed = (await ffprobeVideoDuration(concatPath)) ?? (await ffprobeDuration(concatPath));
+  const durNum = probed && probed > 0.2 ? probed : null;
+  const VID = durNum !== null ? durNum.toFixed(3) : null;
   const hasAudio = await hasAudioStream(concatPath);
-  const args = ["-i", concatPath];
 
+  const args = ["-i", concatPath];
   const graph: string[] = [
     videoParts.length ? `[0:v]${videoParts.join(",")}[vout]` : `[0:v]null[vout]`,
   ];
-  let mapAudio: string | null = null;
-  let outCap: number | null = null;
 
-  if (opts.musicOn) {
-    // Bed length = video length (safe: if the probe missed, default to 60 but
-    // the output -t cap below still trims the mux to the video's real length).
-    const dur = videoDur ?? (await ffprobeDuration(concatPath)) ?? 60;
-    const bedPath = path.join(path.dirname(concatPath), "bed.wav");
-    await generateMusicBed(bedPath, dur, chordFor(opts.themeId));
-    args.push("-i", bedPath);
+  // Music bed: synthesize the style's seamless loop and let ffmpeg loop it for
+  // exactly the film's length (the input-side -t stops it at VID; without a
+  // probed length we fall back to -shortest on the output).
+  let musicUsed = false;
+  if (opts.musicStyle) {
+    const loopPath = path.join(path.dirname(concatPath), `music_${opts.musicStyle}.wav`);
+    await writeMusicLoop(loopPath, opts.musicStyle);
+    if (VID !== null) args.push("-stream_loop", "-1", "-t", VID);
+    else args.push("-stream_loop", "-1");
+    args.push("-i", loopPath);
+    musicUsed = true;
+  }
+
+  // Fades sized to the film so a 4s film still breathes instead of ducking flat.
+  const fadeIn = Math.min(1.4, (durNum ?? 10) * 0.25);
+  const fadeOut = Math.min(2.2, (durNum ?? 10) * 0.3);
+
+  let mapAudio: string | null = null;
+  if (musicUsed && VID !== null) {
+    const music = `[1:a]afade=t=in:st=0:d=${fadeIn.toFixed(3)},` +
+      `afade=t=out:st=${Math.max(0, (durNum as number) - fadeOut).toFixed(3)}:d=${fadeOut.toFixed(3)},` +
+      `atrim=0:${VID},asetpts=N/SR/TB`;
     if (hasAudio) {
-      // Keep the video's own audio with the generated bed mixed low underneath.
-      // duration=first keeps the (shorter) video audio as the mix length.
-      graph.push(`[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0[aout]`);
+      // Keep the film's own audio at full level and sit the bed underneath it.
+      // BOTH inputs are trimmed to VID first and amix=longest then equals VID,
+      // so the mix can never outlast the picture.
+      graph.push(`${music},volume=0.38[m]`);
+      graph.push(`[0:a]atrim=0:${VID},asetpts=N/SR/TB,volume=1.0[v0]`);
+      graph.push(
+        `[v0][m]amix=inputs=2:duration=longest:normalize=0,alimiter=limit=0.95,atrim=0:${VID}[aout]`
+      );
     } else {
-      // Silent (pure-photo) video → the generated bed is the only track. Trim
-      // it to the video length so a stale/long bed never inflates the film.
-      graph.push(`[1:a]atrim=duration=${dur},asetpts=N/SR/TB[aout]`);
+      graph.push(`${music}[aout]`);
     }
     mapAudio = "[aout]";
-    if (videoDur) outCap = videoDur;
+  } else if (musicUsed) {
+    // Could not probe a length — mix the looped bed, capped with -shortest.
+    if (hasAudio) {
+      graph.push(`[1:a]volume=0.38[m]`);
+      graph.push(`[0:a][m]amix=inputs=2:duration=first:dropout_transition=0[aout]`);
+    } else {
+      graph.push(`[1:a]anull[aout]`);
+    }
+    mapAudio = "[aout]";
   } else if (hasAudio) {
-    graph.push(`[0:a]anull[aout]`);
+    // No music: keep the film's own audio, trimmed to the picture.
+    graph.push(VID ? `[0:a]atrim=0:${VID},asetpts=N/SR/TB[aout]` : `[0:a]anull[aout]`);
     mapAudio = "[aout]";
   }
 
@@ -338,17 +377,16 @@ async function finalizeSoloVideo(
     "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
     "-r", String(FPS),
   );
-  if (mapAudio) args.push("-c:a", "aac", "-ar", "44100", "-b:a", "128k");
-  if (opts.musicOn) {
-    // IMPORTANT (ffmpeg 6.1 quirk): with filter_complex graphs, `-shortest`
-    // does NOT reliably trim an over-long generated bed (the output audio can
-    // outlast the video, inflating the file and the player's duration). Cap the
-    // mux explicitly at the video duration — that trims both streams to the
-    // film's true length. This is the fix that keeps photo-only films at their
-    // real ~3s-per-photo length instead of a ~50s silent tail.
+  if (mapAudio) args.push("-c:a", "aac", "-ar", "44100", "-b:a", "160k");
+  if (VID !== null) {
+    // The silent-tail fix: hard-cap the whole mux at the film's true length so
+    // neither stream (and therefore not the container) can run on past it.
+    args.push("-t", VID);
+  } else if (musicUsed) {
+    // Probe failed: best available guarantee that audio cannot outlast video.
     args.push("-shortest");
-    if (outCap !== null) args.push("-t", String(outCap));
   }
+  args.push("-movflags", "+faststart");
   args.push(finishedPath);
 
   await runFfmpeg(args);
@@ -425,7 +463,7 @@ export async function renderSoloVideo(eventId: string): Promise<SoloRenderOutcom
       const prefs = (evRow.prefs ?? {}) as Record<string, unknown>;
       const themeId = evRow.theme_id;
       const filter = String(prefs.filter ?? "none").toLowerCase();
-      const musicOn = prefs.music_on === true;
+      const musicStyle = resolveMusicStyle(prefs, themeId);
       const borderOn = prefs.border_on === true;
       const caption =
         typeof prefs.caption === "string" && prefs.caption.trim()
@@ -553,13 +591,13 @@ export async function renderSoloVideo(eventId: string): Promise<SoloRenderOutcom
       }
 
       const finishedPath = path.join(eventDir, "finished.mp4");
-      const needsPostPass = borderOn || caption !== null || musicOn;
+      const needsPostPass = borderOn || caption !== null || musicStyle !== null;
       if (needsPostPass) {
         // (a) BORDER + (b) CAPTION + (c) GENERATED MUSIC — baked in one pass.
         await finalizeSoloVideo(concatPath, finishedPath, {
           borderOn,
           caption,
-          musicOn,
+          musicStyle,
           themeId,
         });
       } else {

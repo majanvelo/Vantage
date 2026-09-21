@@ -12,8 +12,19 @@ import {
   type SoloVideoRenderInfo,
 } from "~/lib/vantage";
 import SoloResult from "~/components/SoloResult";
+import { MUSIC_STYLES, type MusicStyle } from "~/lib/music";
 
 const MOODS = ["serious", "playful", "formal", "educational"];
+
+/** The music picker's value: a real style, or "off" for no music at all. */
+type MusicSetting = MusicStyle | "off";
+const MUSIC_OPTIONS: MusicSetting[] = ["off", ...MUSIC_STYLES];
+const MUSIC_HINTS: Record<MusicSetting, string> = {
+  off: "No music",
+  calm: "Slow & warm",
+  upbeat: "Bright & driving",
+  dreamy: "Spacious & airy",
+};
 const FILTERS = ["none", "warm", "cool", "vintage", "bw", "cinematic"];
 
 /**
@@ -126,7 +137,8 @@ function SoloPage() {
   const [mood, setMood] = useState("playful");
   const [filter, setFilter] = useState("none");
   const [subtitles, setSubtitles] = useState(true);
-  const [music, setMusic] = useState(true);
+  // Music is ON by default; the picker CHOOSES THE STYLE (Off = no music).
+  const [music, setMusic] = useState<MusicSetting>("calm");
   const [stickers, setStickers] = useState(false);
   const [border, setBorder] = useState(false);
   const [caption, setCaption] = useState("");
@@ -246,7 +258,10 @@ function SoloPage() {
             story_mood: mood,
             filter,
             subtitles_on: subtitles,
-            music_on: music,
+            // music_on stays for compatibility with the older boolean toggle;
+            // music_style is what the renderer actually reads.
+            music_on: music !== "off",
+            music_style: music,
             stickers_on: stickers,
             border_on: border,
           };
@@ -356,7 +371,7 @@ function SoloPage() {
     setMood("playful");
     setFilter("none");
     setSubtitles(true);
-    setMusic(true);
+    setMusic("calm");
     setStickers(false);
     setBorder(false);
     setCaption("");
@@ -387,7 +402,14 @@ function SoloPage() {
     setMood(String(prefs.story_mood ?? "playful"));
     setFilter(String(prefs.filter ?? "none"));
     setSubtitles(prefs.subtitles_on !== false);
-    setMusic(prefs.music_on !== false);
+    const storedStyle = prefs.music_style;
+    setMusic(
+      typeof storedStyle === "string" && (MUSIC_OPTIONS as string[]).includes(storedStyle)
+        ? (storedStyle as MusicSetting)
+        : prefs.music_on === false
+          ? "off"
+          : "calm"
+    );
     setStickers(prefs.stickers_on === true);
     setBorder(prefs.border_on === true);
     setCaption(typeof prefs.caption === "string" ? prefs.caption : "");
@@ -628,7 +650,37 @@ function SoloPage() {
                   </div>
                 </div>
                 <Toggle label="Subtitles" hint="Auto-captions on the finished video" checked={subtitles} onChange={setSubtitles} />
-                <Toggle label="Music" hint="Add a soundtrack matched to your theme" checked={music} onChange={setMusic} />
+                <div className="rounded-xl border border-gray-100 bg-gray-50/70 px-4 py-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-sm font-semibold text-gray-900">Music</span>
+                    <span className="text-xs text-gray-500">
+                      {music === "off"
+                        ? MUSIC_HINTS.off
+                        : `Original ${music} score — ${MUSIC_HINTS[music].toLowerCase()}`}
+                    </span>
+                  </div>
+                  <div className="mt-2 grid grid-cols-4 gap-2">
+                    {MUSIC_OPTIONS.map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => setMusic(m)}
+                        aria-pressed={music === m}
+                        className={`rounded-lg border px-2 py-2 text-xs font-semibold capitalize transition ${
+                          music === m
+                            ? "border-fuchsia-500 bg-fuchsia-600 text-white shadow-sm"
+                            : "border-gray-300 bg-white text-gray-700 hover:border-fuchsia-300"
+                        }`}
+                      >
+                        {m === "off" ? "Off" : m}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="mt-2 text-xs text-gray-500">
+                    Every style is an original, machine-composed track — chords,
+                    melody and a beat. Pick the mood, not the edit.
+                  </p>
+                </div>
                 <Toggle label="Stickers" hint="Playful stickers & emoji overlays" checked={stickers} onChange={setStickers} />
                 <Toggle label="Border / frame" hint="A clean frame around the video" checked={border} onChange={setBorder} />
               </div>
