@@ -124,19 +124,24 @@ function setProgress(eventId: string, p: Partial<RenderProgress>) {
 // ---------------------------------------------------------------------------
 function runFfmpeg(args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn("ffmpeg", ["-y", "-loglevel", "error", ...args], {
-      stdio: ["ignore", "ignore", "pipe"],
-    });
-    let err = "";
-    child.stderr.on("data", (d) => {
-      err += d.toString();
-      if (err.length > 4000) err = err.slice(-4000);
-    });
-    child.on("error", (e) => reject(e));
-    child.on("close", (code) => {
-      if (code === 0) resolve();
-      else {
-        // Include the argv so a render failure can be reproduced by hand.
+    let child: ReturnType<typeof Bun.spawn>;
+    try {
+      child = Bun.spawn(["ffmpeg", "-y", "-loglevel", "error", ...args], {
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "pipe",
+      });
+    } catch (e) {
+      return reject(e);
+    }
+    // NOTE: read the pipe with the Bun stream API. An `on("data")` listener on
+    // the child's stream does NOT deliver bytes here, which used to leave the
+    // captured output empty and hid real ffmpeg failures.
+    new Response(child.stderr)
+      .text()
+      .then(async (err) => {
+        const code = await child.exited;
+        if (code === 0) return resolve();
         const argv = args.join(" ");
         reject(
           new Error(
@@ -145,8 +150,8 @@ function runFfmpeg(args: string[]): Promise<void> {
             }`
           )
         );
-      }
-    });
+      })
+      .catch(reject);
   });
 }
 
@@ -155,20 +160,27 @@ function runFfmpeg(args: string[]): Promise<void> {
 // ---------------------------------------------------------------------------
 function ffprobeJson(args: string[]): Promise<any> {
   return new Promise((resolve, reject) => {
-    const child = spawn("ffprobe", ["-v", "error", "-print_format", "json", ...args], {
-      stdio: ["ignore", "ignore", "pipe"],
-    });
-    let out = "";
-    child.stdout.on("data", (d) => (out += d.toString()));
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code !== 0) return reject(new Error("ffprobe failed"));
-      try {
-        resolve(JSON.parse(out));
-      } catch {
-        reject(new Error("ffprobe returned no JSON"));
-      }
-    });
+    let child: ReturnType<typeof Bun.spawn>;
+    try {
+      child = Bun.spawn(
+        ["ffprobe", "-v", "error", "-print_format", "json", ...args],
+        { stdin: "ignore", stdout: "pipe", stderr: "ignore" }
+      );
+    } catch (e) {
+      return reject(e);
+    }
+    new Response(child.stdout)
+      .text()
+      .then(async (out) => {
+        const code = await child.exited;
+        if (code !== 0) return reject(new Error("ffprobe failed"));
+        try {
+          resolve(JSON.parse(out));
+        } catch {
+          reject(new Error("ffprobe returned no JSON"));
+        }
+      })
+      .catch(reject);
   });
 }
 
