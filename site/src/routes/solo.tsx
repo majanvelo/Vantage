@@ -142,6 +142,12 @@ function SoloPage() {
   const [stickers, setStickers] = useState(false);
   const [border, setBorder] = useState(false);
   const [caption, setCaption] = useState("");
+  /**
+   * "What's your video about?" — an optional one-line STORY the film is built
+   * around. Persisted as prefs.story; the renderer caps it at 80 chars and, on a
+   * photos-only film, opens with it as a title card. Empty = no title card.
+   */
+  const [story, setStory] = useState("");
   const [busy, setBusy] = useState(false);
   /**
    * Live progress for the "Get my video" flow. `percent` is the real mapped
@@ -267,9 +273,14 @@ function SoloPage() {
           };
       // The typed-in caption (owner decision) is stored on prefs.caption and
       // baked onto the finished video by the renderer when non-empty.
-      const prefs = caption.trim()
-        ? { ...basePrefs, caption: caption.trim() }
-        : basePrefs;
+      // The story line is stored on prefs.story (renderer caps at 80 chars) and
+      // applies in BOTH modes: it is the user telling us what the film is about,
+      // so "let the system do everything" keeps it too. Empty = no story.
+      const storyText = story.trim().slice(0, 80);
+      const prefs = {
+        ...(caption.trim() ? { ...basePrefs, caption: caption.trim() } : basePrefs),
+        ...(storyText ? { story: storyText } : {}),
+      };
       setProgress({ stage: "Creating your private composition…", percent: 2 });
       const evRes = await createEvent({
         data: {
@@ -375,6 +386,7 @@ function SoloPage() {
     setStickers(false);
     setBorder(false);
     setCaption("");
+    setStory("");
     setError("");
     setProgress(null);
     setResult(null);
@@ -413,6 +425,7 @@ function SoloPage() {
     setStickers(prefs.stickers_on === true);
     setBorder(prefs.border_on === true);
     setCaption(typeof prefs.caption === "string" ? prefs.caption : "");
+    setStory(typeof prefs.story === "string" ? prefs.story : "");
     setError("");
     setProgress(null);
     setResult(null);
@@ -606,6 +619,27 @@ function SoloPage() {
                 />
               </span>
             </button>
+
+            {/* Optional story line. Always visible (it applies with "let the
+                system do everything" too): the film is built around it, and a
+                photos-only film opens with it as a title card. */}
+            <div className="mt-5">
+              <label className="block text-sm font-semibold text-gray-900">
+                What&apos;s your video about?{" "}
+                <span className="font-normal text-gray-400">(optional)</span>
+              </label>
+              <input
+                value={story}
+                onChange={(e) => setStory(e.target.value)}
+                placeholder="e.g. A summer day at the lake"
+                maxLength={80}
+                className="mt-1.5 w-full rounded-xl border border-gray-300 px-4 py-2.5 text-gray-900 focus:border-fuchsia-500 focus:outline-none"
+              />
+              <p className="mt-1.5 text-xs text-gray-500">
+                Leave it blank and we&apos;ll just pick for you. Add it and your
+                film opens with it as a title card.
+              </p>
+            </div>
 
             {!system && (
               <div className="mt-5 space-y-3">
