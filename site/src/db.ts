@@ -1,4 +1,5 @@
 import { Pool } from "pg";
+import { upsertThemeCatalog } from "./lib/theme-catalog";
 
 /**
  * Server-only handle to the team's Postgres database.
@@ -172,23 +173,8 @@ export async function ensureSchema(): Promise<void> {
     )
   `);
 
-  // Starter theme catalog (Phase-1 selection; is_plus marks the Plus-tier packs).
-  const themes: Array<[string, string, boolean, number]> = [
-    ["vacation", "Vacation", false, 1],
-    ["travel", "Travel", false, 2],
-    ["romantic", "Romantic / Love", false, 3],
-    ["school", "School / Study", false, 4],
-    ["fashion", "Fashion", false, 5],
-    ["hiphop", "Hip-Hop", true, 6],
-    ["food", "Food", false, 7],
-    ["vlog", "Vlog", false, 8],
-  ];
-  for (const [slug, name, plus, sort] of themes) {
-    await query(
-      `insert into themes (slug, display_name, is_plus, sort_order)
-       values ($1, $2, $3, $4)
-       on conflict (slug) do update set display_name = excluded.display_name, is_plus = excluded.is_plus, sort_order = excluded.sort_order`,
-      [slug, name, plus, sort]
-    );
-  }
+  // Theme catalog. The list lives in src/lib/theme-catalog.ts so this bootstrap
+  // and scripts/seed-themes.ts can never drift apart. Upsert on `slug`, so
+  // running it repeatedly is safe and never duplicates rows.
+  await upsertThemeCatalog(query);
 }
