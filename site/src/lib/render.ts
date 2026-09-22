@@ -7,10 +7,16 @@
  * `uploads/<eventId>/finished.mp4` (served back at `/uploads/<eventId>/finished.mp4`).
  *
  * Composition:
- *   - Photos get a subtle Ken Burns pan/zoom (~3s each) via ffmpeg `zoompan`,
- *     joined in upload order → a real motion slideshow.
- *   - Video clips are re-encoded to a unified MP4 (same dimensions/codec) and
- *     concatenated in sequence, so photos + videos can share one finished file.
+ *   - PHOTOS-ONLY uploads (no clips at all) get the CINEMATIC MOTION path
+ *     (buildPhotosMotionFilm): every photo becomes a motion shot — an
+ *     alternating Ken Burns move (zoom-in / pan L→R / zoom-out / pan R→L) with
+ *     eased (smoothstep) motion, a real crossfade DISSOLVE between shots, and
+ *     shot lengths cut on the music bed's beat grid. When a story line is
+ *     present it also opens with a title card (blurred, darkened, slow zoom,
+ *     big centered story text, fade-in). The result is a film, not a slideshow.
+ *   - Photos mixed with clips (and clip-only uploads) keep the original
+ *     segment path: each photo gets a Ken Burns pan/zoom, clips are re-encoded
+ *     to a unified MP4 and everything is concatenated in upload order.
  *   - The color filter from event.prefs.filter (none/warm/cool/vintage/bw/
  *     cinematic) is mapped to ffmpeg color filters and applied at render time.
  *   - Music: a 100% SYNTHESIZED, original, non-copyright bed (see ./music.ts)
@@ -37,6 +43,7 @@ import {
   DEFAULT_MUSIC_STYLE,
   autoMusicStyle,
   isMusicStyle,
+  secondsPerBeat,
   synthesizeMusicWav,
   type MusicStyle,
 } from "./music";
@@ -433,6 +440,330 @@ export function filterChain(filter: string): string {
   }
 }
 
+// ---------------------------------------------------------------------------
+// PHOTOS-ONLY CINEMATIC MOTION FILM
+//
+// A photos-only upload must not come back as a static slideshow. This path
+// renders each photo as a MOTION SHOT and then dissolves between shots:
+//
+//   * MOTION — each shot gets one of four alternating Ken Burns moves
+//     (zoom-in / pan L→R / zoom-out / pan R→L, cycling) driven by a smoothstep
+//     eased progress expression, so the move starts and lands softly instead of
+//     moving at a constant mechanical rate. `x`/`y` are always set, so the zoom
+//     is anchored where the move wants it (centre / travelling), never the
+//     zoompan default top-left corner.
+//   * TRANSITIONS — shots are chained with ffmpeg `xfade` (a real dissolve
+//     crossfade), never a hard cut.
+//   * BEAT-SYNCED PACING — a shot lasts one musical BAR (4 beats) of the bed
+//     chosen in music.ts (calm 72 BPM ≈ 3.33s, dreamy 60 BPM = 4.0s, upbeat
+//     118 BPM ≈ 2.03s), so every cut lands on a downbeat and a slow bed gets
+//     longer shots while an upbeat bed gets snappier ones. With no bed, shots
+//     fall back to a neutral ~3.2s.
+//   * STORY SHAPING — when the user typed "What's your video about?", the film
+//     opens with a TITLE CARD: the first photo blurred, darkened and slowly
+//     pushed in, with the story line in big centered white type, fading up from
+//     black and dissolving into the first motion shot.
+//
+// All zoompan expressions are written COMMA-FREE (no if()/min() with commas) so
+// they survive filtergraph parsing untouched.
+// ---------------------------------------------------------------------------
+
+/** One musical bar per photo: 4 beats of the chosen bed. */
+const BEATS_PER_SHOT = 4;
+/** Shot length when there is no music bed to sync to. */
+const DEFAULT_SHOT_SECONDS = 3.2;
+const SHOT_SECONDS_MIN = 1.8;
+const SHOT_SECONDS_MAX = 4.5;
+/** Dissolve length bounds — subtle, never a wipe. */
+const CROSSFADE_MIN = 0.45;
+const CROSSFADE_MAX = 0.8;
+/** Title-card length bounds. */
+const TITLE_MIN_SECONDS = 2.4;
+const TITLE_MAX_SECONDS = 4.0;
+/** Story line is capped like the caption field is (UI caps at the same number). */
+const STORY_MAX_CHARS = 80;
+
+function clampNum(v: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, v));
+}
+
+/** Shot length derived from the music bed's tempo (see music.ts). */
+export function photoShotSeconds(musicStyle: MusicStyle | null): number {
+  if (!musicStyle) return DEFAULT_SHOT_SECONDS;
+  return clampNum(
+    secondsPerBeat(musicStyle) * BEATS_PER_SHOT,
+    SHOT_SECONDS_MIN,
+    SHOT_SECONDS_MAX
+  );
+}
+
+/** Dissolve length: a constant fraction of the shot, kept subtle. */
+export function crossfadeSeconds(shotSeconds: number): number {
+  return clampNum(Number((shotSeconds * 0.22).toFixed(2)), CROSSFADE_MIN, CROSSFADE_MAX);
+}
+
+/** How long the story title card holds (one bar, clamped). */
+export function storyTitleSeconds(shotSeconds: number): number {
+  return clampNum(shotSeconds, TITLE_MIN_SECONDS, TITLE_MAX_SECONDS);
+}
+
+/** Big, centered, but never wider than the frame: shrink for long story lines. */
+export function storyFontSize(text: string): number {
+  const maxWidth = W - 140;
+  const est = maxWidth / Math.max(1, text.length * 0.66);
+  return Math.round(clampNum(est, 22, 68));
+}
+
+type ShotMove = "zoom-in" | "pan-right" | "zoom-out" | "pan-left";
+/** Alternating moves so consecutive shots never feel like the same shot twice. */
+const SHOT_MOVES: ShotMove[] = ["zoom-in", "pan-right", "zoom-out", "pan-left"];
+
+/** Eased 0→1 progress within a shot, comma-free for the filtergraph parser. */
+function smoothstepExpr(frames: number): string {
+  const n = Math.max(1, frames - 1);
+  const p = `(on/${n})`;
+  return `(${p}*${p}*(3-2*${p}))`;
+}
+
+/** Blurred-background "fit" composite: the whole photo stays visible, bars filled. */
+function fitCompositeHead(): string[] {
+  return [
+    "[0:v]split=2[bg][fg]",
+    `[bg]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},boxblur=20:2[bgblur]`,
+    `[fg]scale=${W}:${H}:force_original_aspect_ratio=decrease[fgfit]`,
+    "[bgblur][fgfit]overlay=(W-w)/2:(H-h)/2",
+  ];
+}
+
+type MotionPhotoShot = {
+  imagePath: string;
+  outPath: string;
+  seconds: number;
+  move: ShotMove;
+  colorChain: string;
+};
+
+/** Encode ONE photo as a cinematic motion shot (silent video; audio comes later). */
+async function renderMotionPhotoShot(shot: MotionPhotoShot): Promise<void> {
+  const frames = Math.max(2, Math.round(shot.seconds * FPS));
+  const t = smoothstepExpr(frames);
+  let z: string;
+  let x: string;
+  let y: string;
+  switch (shot.move) {
+    case "zoom-in":
+      z = `1.04+0.12*${t}`;
+      x = "(iw-iw/zoom)/2";
+      y = "(ih-ih/zoom)/2";
+      break;
+    case "pan-right":
+      z = `1.10+0.05*${t}`;
+      x = `(iw-iw/zoom)*${t}`;
+      y = `(ih-ih/zoom)*(0.5-0.12*${t})`;
+      break;
+    case "zoom-out":
+      z = `1.16-0.12*${t}`;
+      x = "(iw-iw/zoom)/2";
+      y = "(ih-ih/zoom)/2";
+      break;
+    case "pan-left":
+    default:
+      z = `1.06+0.09*${t}`;
+      x = `(iw-iw/zoom)*(1-${t})`;
+      y = `(ih-ih/zoom)*(0.5+0.12*${t})`;
+      break;
+  }
+  const cast = [
+    `zoompan=z='${z}':x='${x}':y='${y}':d=${frames}:s=${W}x${H}:fps=${FPS}`,
+    ...(shot.colorChain ? [shot.colorChain] : []),
+    "format=yuv420p",
+    "setdar=16/9",
+  ].join(",");
+  const filterComplex = `${fitCompositeHead().join(";")},${cast}[vout]`;
+  await runFfmpeg([
+    "-loop", "1", "-t", (shot.seconds + 0.3).toFixed(3),
+    "-i", shot.imagePath,
+    "-filter_complex", filterComplex,
+    "-map", "[vout]",
+    "-r", String(FPS),
+    "-t", (frames / FPS).toFixed(3),
+    "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+    shot.outPath,
+  ]);
+}
+
+/** Encode the story TITLE CARD: blurred/darkened first photo + big centered story line. */
+async function renderStoryTitleShot(args: {
+  imagePath: string;
+  outPath: string;
+  seconds: number;
+  story: string;
+  colorChain: string;
+}): Promise<void> {
+  const frames = Math.max(2, Math.round(args.seconds * FPS));
+  const t = smoothstepExpr(frames);
+  const head =
+    `[0:v]scale=${W}:${H}:force_original_aspect_ratio=increase,` +
+    `crop=${W}:${H},boxblur=40:3,gblur=sigma=10,eq=brightness=-0.16:saturation=0.9`;
+  const cast = [
+    `zoompan=z='1.02+0.08*${t}':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)/2':d=${frames}:s=${W}x${H}:fps=${FPS}`,
+    ...(args.colorChain ? [args.colorChain] : []),
+    `drawtext=fontfile=${CAPTION_FONT}:` +
+      `text='${escapeDrawtext(args.story)}':` +
+      `fontsize=${storyFontSize(args.story)}:fontcolor=white:` +
+      `x=(w-text_w)/2:y=(h-text_h)/2:` +
+      `shadowx=3:shadowy=3:shadowcolor=black@0.55`,
+    "fade=t=in:st=0:d=0.6",
+    "format=yuv420p",
+    "setdar=16/9",
+  ].join(",");
+  await runFfmpeg([
+    "-loop", "1", "-t", (args.seconds + 0.3).toFixed(3),
+    "-i", args.imagePath,
+    "-filter_complex", `${head},${cast}[vout]`,
+    "-map", "[vout]",
+    "-r", String(FPS),
+    "-t", (frames / FPS).toFixed(3),
+    "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+    args.outPath,
+  ]);
+}
+
+type MotionFilmInput = {
+  /** Storage keys (absolute paths) of the photos, in upload order. */
+  photos: { key: string }[];
+  renderDir: string;
+  colorChain: string;
+  /** Trimmed story line, or null. */
+  story: string | null;
+  shotSeconds: number;
+  musicStyle: MusicStyle | null;
+  onStage: (stage: string, percent: number) => void;
+};
+
+/**
+ * Build the photos-only motion film: N motion shots (plus an optional title
+ * card) dissolved into each other on the music's beat grid, with a silent audio
+ * track of exactly the film's length (the music bed is mixed on top later by
+ * finalizeSoloVideo). Returns the path of the film.
+ */
+export async function buildPhotosMotionFilm(
+  input: MotionFilmInput
+): Promise<string> {
+  const dissolve = crossfadeSeconds(input.shotSeconds);
+  const story = input.story ? input.story.slice(0, STORY_MAX_CHARS).trim() : null;
+
+  const shots: { key: string; seconds: number; move: ShotMove; title: boolean }[] = [];
+  if (story) {
+    shots.push({
+      key: input.photos[0].key,
+      seconds: storyTitleSeconds(input.shotSeconds),
+      move: "zoom-in",
+      title: true,
+    });
+  }
+  input.photos.forEach((p, i) => {
+    shots.push({
+      key: p.key,
+      seconds: input.shotSeconds,
+      move: SHOT_MOVES[i % SHOT_MOVES.length],
+      title: false,
+    });
+  });
+
+  // Encode each shot. Every shot but the last carries the dissolve overlap, so
+  // the finished film is exactly sum(shot lengths) — the overlap is absorbed by
+  // the crossfades rather than added to the runtime.
+  const segPaths: string[] = [];
+  const encodeSeconds: number[] = [];
+  for (let j = 0; j < shots.length; j++) {
+    const s = shots[j];
+    const isLast = j === shots.length - 1;
+    const enc = s.seconds + (isLast ? 0 : dissolve);
+    encodeSeconds.push(enc);
+    const out = path.join(input.renderDir, `motion_${j}.mp4`);
+    const photoNo = s.title ? 0 : j - (story ? 1 : 0);
+    input.onStage(
+      s.title
+        ? "Designing your title card…"
+        : `Filming photo ${photoNo + 1} of ${input.photos.length}…`,
+      Math.round(70 + ((j + 1) / (shots.length + 1)) * 16)
+    );
+    if (s.title && story) {
+      await renderStoryTitleShot({
+        imagePath: absolutePath(s.key),
+        outPath: out,
+        seconds: enc,
+        story,
+        colorChain: input.colorChain,
+      });
+    } else {
+      await renderMotionPhotoShot({
+        imagePath: absolutePath(s.key),
+        outPath: out,
+        seconds: enc,
+        move: s.move,
+        colorChain: input.colorChain,
+      });
+    }
+    segPaths.push(out);
+  }
+
+  const total = shots.reduce((a, s) => a + s.seconds, 0);
+  input.onStage("Cutting it to the music…", 89);
+  const filmPath = path.join(input.renderDir, "motion.mp4");
+  const encodeOut = [
+    "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+    "-r", String(FPS),
+  ];
+
+  if (segPaths.length === 1) {
+    // One shot: no dissolve to make, just give the film a real audio track.
+    await runFfmpeg([
+      "-i", segPaths[0],
+      "-f", "lavfi", "-i", SILENT_AUDIO_INPUT,
+      "-map", "0:v", "-map", "1:a",
+      "-t", total.toFixed(3),
+      "-c:v", "copy",
+      "-c:a", "aac", "-ar", "44100", "-b:a", "160k",
+      "-movflags", "+faststart",
+      filmPath,
+    ]);
+    return filmPath;
+  }
+
+  // Chain the shots with real crossfades (xfade), each transition starting on a
+  // bar line: offset(k) = sum(shot lengths so far) — i.e. exactly the beat grid.
+  const args: string[] = [];
+  for (const p of segPaths) args.push("-i", p);
+  args.push("-f", "lavfi", "-i", SILENT_AUDIO_INPUT);
+  const chain: string[] = [];
+  let offset = 0;
+  let prev = "[0:v]";
+  for (let j = 1; j < segPaths.length; j++) {
+    offset += encodeSeconds[j - 1] - dissolve;
+    const isLast = j === segPaths.length - 1;
+    const label = isLast ? "[vfilm]" : `[vx${j}]`;
+    chain.push(
+      `${prev}[${j}:v]xfade=transition=fade:duration=${dissolve.toFixed(3)}` +
+        `:offset=${offset.toFixed(3)}${label}`
+    );
+    prev = label;
+  }
+  args.push(
+    "-filter_complex", chain.join(";"),
+    "-map", "[vfilm]",
+    "-map", `${segPaths.length}:a`,
+    "-t", total.toFixed(3),
+    ...encodeOut,
+    "-c:a", "aac", "-ar", "44100", "-b:a", "160k",
+    "-movflags", "+faststart",
+    filmPath
+  );
+  await runFfmpeg(args);
+  return filmPath;
+}
+
 export type SoloRenderOutcome = { ok: boolean; message?: string };
 
 // Segment dimensions / fps — a unified 1280x720@25 h264 MP4 for clean concat.
@@ -511,6 +842,35 @@ export async function renderSoloVideo(eventId: string): Promise<SoloRenderOutcom
       const photos = usable.filter((c) => c.media_type === "photo");
       const videos = usable.filter((c) => c.media_type === "video");
 
+      // PHOTOS-ONLY uploads take the cinematic motion path (motion shots +
+      // dissolves + story title card, cut to the music's beat). Photos mixed
+      // with clips and clip-only uploads keep the original segment path.
+      const photosOnly = photos.length > 0 && videos.length === 0;
+      const shotSeconds = photoShotSeconds(musicStyle);
+      const story =
+        typeof prefs.story === "string" && prefs.story.trim()
+          ? prefs.story.trim().slice(0, 80)
+          : null;
+      // Both paths converge on one silent "source film" that the shared tail
+      // below gives its finishing pass (music bed / border / caption) and turns
+      // into finished.mp4: photos-only = the motion film, everything else = the
+      // concatenated segments.
+      let filmPath: string | null = null;
+      if (photosOnly) {
+        setProgress(eventId, {
+          stage: "Adding cinematic motion…",
+          percent: 70,
+        });
+        filmPath = await buildPhotosMotionFilm({
+          photos: photos.map((p) => ({ key: p.s3_or_storage_key! })),
+          renderDir,
+          colorChain,
+          story,
+          shotSeconds,
+          musicStyle,
+          onStage: (stage, percent) => setProgress(eventId, { stage, percent }),
+        });
+      } else {
       // 3. Render each photo → Ken Burns motion slide (3s).
       const photoSpan = photos.length > 0 ? 18 : 0; // 70 → 88
       for (let i = 0; i < photos.length; i++) {
@@ -626,19 +986,22 @@ export async function renderSoloVideo(eventId: string): Promise<SoloRenderOutcom
       if (!(await Bun.file(concatPath).exists())) {
         throw new Error("Render produced no output file.");
       }
+      filmPath = concatPath;
+      } // end else (segments path)
 
+      if (filmPath === null) throw new Error("No usable clips to render.");
       const finishedPath = path.join(eventDir, "finished.mp4");
       const needsPostPass = borderOn || caption !== null || musicStyle !== null;
       if (needsPostPass) {
         // (a) BORDER + (b) CAPTION + (c) GENERATED MUSIC — baked in one pass.
-        await finalizeSoloVideo(concatPath, finishedPath, {
+        await finalizeSoloVideo(filmPath, finishedPath, {
           borderOn,
           caption,
           musicStyle,
           themeId,
         });
       } else {
-        await Bun.write(finishedPath, await Bun.file(concatPath).arrayBuffer());
+        await Bun.write(finishedPath, await Bun.file(filmPath).arrayBuffer());
       }
 
       if (!(await Bun.file(finishedPath).exists())) {

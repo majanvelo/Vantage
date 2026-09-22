@@ -416,6 +416,15 @@ export function loopSecondsFor(style: MusicStyle): number {
 }
 
 /**
+ * Seconds per beat for a style (60 / BPM). The renderer uses this to cut
+ * photo shots on the music's beat grid, so a slow bed gets longer shots and an
+ * upbeat bed gets snappier ones — the cuts read as musical rather than arbitrary.
+ */
+export function secondsPerBeat(style: MusicStyle): number {
+  return 60 / PLANS[style].bpm;
+}
+
+/**
  * Synthesize the style's seamless 4-chord loop as interleaved-free stereo PCM.
  */
 function synthesize(style: MusicStyle): Stereo {
