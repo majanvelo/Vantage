@@ -42,6 +42,7 @@
  */
 
 import type {
+  DirectorClip,
   DirectorGap,
   DirectorOptions,
   DirectorShot,
@@ -57,8 +58,13 @@ export interface DirectorSelection {
   violations: DirectorViolation[];
   /** Total switch penalty paid by the chosen path (diagnostics). */
   total_switch_penalty: number;
+  /** Objective value of the chosen path: Σ emissions − penalties (diagnostics,
+   *  and what the demo checks against a brute-force optimum). */
+  total_score: number;
   /** Cameras used, in order (diagnostics). */
   camera_sequence: string[];
+  /** Slice indices whose only candidates were partial (a clamped shot, + a gap). */
+  partial_slices: number[];
 }
 
 interface State {
@@ -81,31 +87,42 @@ function stateKey(cur: string, runLen: number, recent: string[]): string {
 
 /**
  * Select the shot sequence. `scoreMatrix[t]` must correspond to `slices[t]`.
+ *
+ * `clips` is optional but strongly recommended: it carries the clip footprints
+ * (offset_ms + duration_ms) that shots are clamped to, so a shot NEVER asks for
+ * source time outside the clip's own file. Without it, clamping falls back to the
+ * candidate's own source window (correct for the common cases, see
+ * `coveredRangeFor`).
  */
 export function selectShots(
   scoreMatrix: ScoredCandidate[][],
   slices: SliceWindow[],
-  options: DirectorOptions = {}
+  options: DirectorOptions = {},
+  clips: DirectorClip[] = []
 ): DirectorSelection {
   const opts = resolveOptions(options);
   const K = Math.max(1, Math.round(opts.returnCooldownSlices));
   const minHold = Math.max(1, Math.round(opts.minHoldSlices));
+  const clipById = new Map(clips.map((c) => [c.clip_id, c]));
 
   /** Best state per slice index (one entry per distinct history key). */
   let frontier: State[] = [];
   const chosen: State[] = []; // one surviving state per slice (backtrace anchor)
   const gaps: DirectorGap[] = [];
   const violations: DirectorViolation[] = [];
+  const partialSlices: number[] = [];
 
   for (let t = 0; t < slices.length; t++) {
     const window = slices[t];
-    const candidates = scoreMatrix[t] ?? [];
+    // Only ELIGIBLE candidates may own the slice (a partial candidate is
+    // ineligible when some other clip fills the slice completely).
+    const candidates = (scoreMatrix[t] ?? []).filter((c) => c.eligible);
     if (candidates.length === 0) {
-      // No footage at all in this window: a gap. History is carried through
-      // unchanged — the film simply has nothing to show here.
-      gaps.push({ ...window, slice_index: t });
+      // No footage at all in this window: a gap (recorded below from the final
+      // shot union, so it is indexed here only for the reason).
       continue;
     }
+    if (candidates.every((c) => c.signals.partial)) partialSlices.push(t);
 
     const next: State[] = [];
     const bestByKey = new Map<string, State>();
@@ -201,44 +218,50 @@ export function selectShots(
   }
   sequence.reverse();
 
-  // --- merge consecutive same-camera slices into shots; gaps break shots ---
+  // --- merge consecutive same-camera slices into shots, clamped to footage ---
   const shots: DirectorShot[] = [];
-  const coveredSlices = new Set(sequence.map((s) => s.sliceIndex));
-  let current: {
-    clip_id: string;
-    start_ms: number;
-    end_ms: number;
-    count: number;
-    scoreSum: number;
-  } | null = null;
+  const steps: Array<{ cand: ScoredCandidate; from: number; to: number }> = sequence.map((s) => {
+    const clipped = coveredRangeFor(s.cand, slices[s.sliceIndex], clipById.get(s.cand.clip_id));
+    return { cand: s.cand, from: clipped[0], to: clipped[1] };
+  });
 
-  for (let t = 0; t < slices.length; t++) {
-    if (!coveredSlices.has(t)) {
-      // Gap: close the open shot; a later same-camera run does NOT merge across
-      // the hole (the footage is missing, the shots are not continuous).
-      if (current) {
-        shots.push(finishShot(current, shots.length > 0));
-        current = null;
-      }
+  for (const step of steps) {
+    if (step.to <= step.from) continue; // no real footage for this step (defensive)
+    const last = shots[shots.length - 1];
+    // Merge only when the camera is the same AND the footage is contiguous —
+    // a clamp (partial coverage) or a gap breaks the shot, because the film
+    // cannot be continuous across a stretch it has no footage for.
+    if (last && last.clip_id === step.cand.clip_id && last.end_ms === step.from) {
+      last.end_ms = step.to;
+      last.slices = (last.slices ?? 1) + 1;
+      last.mean_score = ((last.mean_score ?? 0) * (last.slices - 1) + step.cand.score) / last.slices;
       continue;
     }
-    const pick = sequence.find((s) => s.sliceIndex === t)!;
-    if (current && current.clip_id === pick.clip_id) {
-      current.end_ms = slices[t].end_ms;
-      current.count++;
-      current.scoreSum += pick.cand.score;
-    } else {
-      if (current) shots.push(finishShot(current, shots.length > 0));
-      current = {
-        clip_id: pick.clip_id,
-        start_ms: slices[t].start_ms,
-        end_ms: slices[t].end_ms,
-        count: 1,
-        scoreSum: pick.cand.score,
-      };
-    }
+    shots.push({
+      clip_id: step.cand.clip_id,
+      start_ms: step.from,
+      end_ms: step.to,
+      slices: 1,
+      mean_score: step.cand.score,
+      cut_in: shots.length > 0,
+    });
   }
-  if (current) shots.push(finishShot(current, shots.length > 0));
+
+  // --- gaps = the timeline minus the union of the shots --------------------
+  // This is the authoritative gap list: it covers BOTH slices with no footage at
+  // all and the uncovered remainder of a slice whose only camera could not fill
+  // it. Shots are non-overlapping and ascending by construction, so a single
+  // sweep is enough.
+  gaps.length = 0;
+  const timelineEnd = slices.length > 0 ? slices[slices.length - 1].end_ms : 0;
+  let cursor = 0;
+  for (const shot of shots) {
+    if (shot.start_ms > cursor) {
+      gaps.push(makeGap(cursor, shot.start_ms, slices, partialSlices));
+    }
+    cursor = Math.max(cursor, shot.end_ms);
+  }
+  if (cursor < timelineEnd) gaps.push(makeGap(cursor, timelineEnd, slices, partialSlices));
 
   const finalState = chosen.length > 0 ? chosen[chosen.length - 1] : null;
   return {
@@ -246,22 +269,51 @@ export function selectShots(
     gaps,
     violations: finalState?.violations ?? [],
     total_switch_penalty: finalState?.penalty ?? 0,
+    total_score: finalState?.score ?? 0,
     camera_sequence: sequence.map((s) => s.clip_id),
+    partial_slices: partialSlices,
   };
 }
 
-function finishShot(
-  cur: { clip_id: string; start_ms: number; end_ms: number; count: number; scoreSum: number },
-  cutIn: boolean
-): DirectorShot {
+/** Classify a gap: nothing at all covered that slice, or only a partial camera. */
+function makeGap(
+  start_ms: number,
+  end_ms: number,
+  slices: SliceWindow[],
+  partialSlices: number[]
+): DirectorGap {
+  const slice_index = slices.findIndex((s) => start_ms >= s.start_ms && start_ms < s.end_ms);
+  const idx = slice_index >= 0 ? slice_index : 0;
   return {
-    clip_id: cur.clip_id,
-    start_ms: cur.start_ms,
-    end_ms: cur.end_ms,
-    slices: cur.count,
-    mean_score: cur.scoreSum / cur.count,
-    cut_in: cutIn,
+    start_ms,
+    end_ms,
+    slice_index: idx,
+    reason: partialSlices.includes(idx) ? "partial_coverage" : "no_footage",
   };
+}
+
+/**
+ * The stretch of the shared timeline a chosen candidate can actually show.
+ *
+ * With the clip's footprint we simply intersect: [slice] ∩ [offset, offset+dur].
+ * Without it we infer from the candidate's source window: a partial candidate
+ * either starts at its file's beginning (so it covers the TAIL of the slice) or
+ * ends at its file's end (so it covers the HEAD).
+ */
+function coveredRangeFor(
+  cand: ScoredCandidate,
+  slice: SliceWindow,
+  clip: DirectorClip | undefined
+): [number, number] {
+  if (clip) {
+    const from = Math.max(slice.start_ms, clip.offset_ms);
+    const to = Math.min(slice.end_ms, clip.offset_ms + clip.duration_ms);
+    return [from, Math.max(from, to)];
+  }
+  if (!cand.signals.partial) return [slice.start_ms, slice.end_ms];
+  const len = cand.source_duration_ms;
+  if (cand.source_start_ms === 0) return [slice.end_ms - len, slice.end_ms];
+  return [slice.start_ms, slice.start_ms + len];
 }
 
 /**
@@ -275,7 +327,7 @@ export function greedyShots(
 ): string[] {
   const out: string[] = [];
   for (let t = 0; t < slices.length; t++) {
-    const candidates = scoreMatrix[t] ?? [];
+    const candidates = (scoreMatrix[t] ?? []).filter((c) => c.eligible);
     if (candidates.length === 0) continue;
     let best = candidates[0];
     for (const c of candidates) if (c.score > best.score) best = c;

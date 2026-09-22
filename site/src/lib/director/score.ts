@@ -105,7 +105,18 @@ function percentile(xs: number[], p: number): number {
 // options
 // ---------------------------------------------------------------------------
 
-export const DEFAULT_WEIGHTS: ScoreWeights = { stability: 0.35, audio: 0.4, face: 0.25 };
+/**
+ * Signal weights. Rationale (not arbitrary):
+ *   audio 0.45 — in multi-camera event footage audio is the FIRST thing that
+ *     breaks the illusion: a cut to a camera with quiet/muffled sound is jarring
+ *     and cannot be fixed later, while mild shake can. The Murch rule (cut on the
+ *     sound, hide the picture) is why the loudest clear camera leads.
+ *   stability 0.30 — picture quality: prefer the locked-off camera.
+ *   face 0.25 — prefer shots that actually show the people (v1 proxy: centered
+ *     skin-toned content). Enough to break ties toward the camera on the subject
+ *     without letting the heuristic dominate the decision.
+ */
+export const DEFAULT_WEIGHTS: ScoreWeights = { stability: 0.3, audio: 0.45, face: 0.25 };
 
 /** Fully-resolved options (every field present) used internally. */
 export interface ResolvedOptions {
@@ -128,6 +139,9 @@ export interface ResolvedOptions {
   audioRefFloor: number;
   /** Skin-tone fraction of the center-weighted area that scores full marks. */
   skinRef: number;
+  /** Fraction of the event's loudest level below which audio counts as silence
+   *  (used to gate the speech-likeness term). */
+  speechGateLevel: number;
   /** Reliability of the audio level anchor when only one clip exists. */
   singleClipAudioRef: number;
 }
@@ -140,9 +154,9 @@ export function resolveOptions(opts: DirectorOptions = {}): ResolvedOptions {
     speechWeight: opts.speechWeight ?? 0.15,
     motionRefPerSec: opts.motionRefPerSec ?? 0.12,
     jitterRefPerSec: opts.jitterRefPerSec ?? 0.1,
-    probeFps: opts.probeFps ?? 6,
-    probeWidth: opts.probeWidth ?? 96,
-    probeHeight: opts.probeHeight ?? 54,
+    probeFps: opts.probeFps ?? 8,
+    probeWidth: opts.probeWidth ?? 128,
+    probeHeight: opts.probeHeight ?? 72,
     probeMaxSeconds: opts.probeMaxSeconds ?? 300,
     missingSignalScore: opts.missingSignalScore ?? 0.5,
     switchPenalty: opts.switchPenalty ?? 0.15,
@@ -151,6 +165,7 @@ export function resolveOptions(opts: DirectorOptions = {}): ResolvedOptions {
     violationPenalty: opts.violationPenalty ?? 1,
     audioRefFloor: 200,
     skinRef: 0.18,
+    speechGateLevel: 0.2,
     singleClipAudioRef: 6000,
   };
 }
@@ -294,7 +309,26 @@ export interface StabilityStats {
   frames: number;
 }
 
-/** Raw stability statistics for a window (also used by the demo for calibration). */
+/**
+ * Raw stability statistics for a window (also used by the demo for calibration).
+ *
+ * BOTH statistics are ROBUST (median-based), and that is deliberate. The first
+ * implementation used mean + standard deviation and it read badly on real-shaped
+ * footage: a single hard content change inside the window (a subject walking in, a
+ * light switching on, the moment a recording starts) spiked both, so a perfectly
+ * locked-off camera scored as shaky. A genuinely shaky camera has a CONSISTENTLY
+ * large frame-to-frame change, which is exactly what the median captures; the
+ * median absolute deviation (scaled by 1.4826, so it is comparable to a standard
+ * deviation) captures how erratic that change is while ignoring one-off outliers.
+ *
+ *   motion_per_sec = median(frame diffs) × fps   — typical change per second
+ *   jitter_per_sec = 1.4826 × MAD(frame diffs) × fps — how erratic it is
+ *
+ * Known limitation: a fast pan, a whip, heavy sensor noise or a strongly moving
+ * subject all register as "motion", and this is a shake proxy, not optical-flow
+ * stabilisation. The bias (prefer the calmest camera) is the right one for a live
+ * switcher.
+ */
 export function stabilityStats(
   frames: VisualFrames,
   fromMs: number,
@@ -307,8 +341,10 @@ export function stabilityStats(
   if (diffs.length === 0) {
     return { stability: 1, motion_per_sec: 0, jitter_per_sec: 0, frames: 0 };
   }
-  const motion = mean(diffs) * frames.fps;
-  const jitter = stddev(diffs) * frames.fps;
+  const med = percentile(diffs, 0.5);
+  const motion = med * frames.fps;
+  const deviations = diffs.map((d) => Math.abs(d - med));
+  const jitter = 1.4826 * percentile(deviations, 0.5) * frames.fps;
   const penalty =
     0.55 * clamp01(motion / opts.motionRefPerSec) + 0.45 * clamp01(jitter / opts.jitterRefPerSec);
   return {
@@ -379,10 +415,22 @@ export function audioStats(
   const m = mean(win);
   const p90 = percentile(win, 0.9);
   const level = 0.65 * clamp01(m / ref) + 0.35 * clamp01(p90 / ref);
-  // Speech-likeness: syllabic audio has a much more variable 50 ms envelope than
-  // a steady tone or room tone. CoV → 0.65 counts as "clearly speech-like".
-  const cv = m > 1e-6 ? stddev(win) / m : 0;
-  const speechiness = clamp01(cv / 0.65);
+  // Speech-likeness (cheap, honest heuristic — NOT a voice-activity detector):
+  // speech is syllabic, so at 50 ms resolution the envelope jitters up and down
+  // continuously (~4 Hz), while a steady tone, music pad or room tone does not.
+  // We measure the MEDIAN absolute change between adjacent windows relative to
+  // the mean level, not the variance: a median is immune to the one-off jump a
+  // window can contain (a mic being unmuted, a door slamming), which a variance
+  // would count as "lots of syllables" — the first implementation made that
+  // mistake in the demo and it was visible in the score matrix.
+  // The whole term is GATED BY LEVEL: CoV-style measures divide by the mean, so a
+  // nearly silent window (a dead mic, a pocketed phone) would otherwise be
+  // rewarded for "varying". Silence is not speech.
+  const adj: number[] = [];
+  for (let i = 1; i < win.length; i++) adj.push(Math.abs(win[i] - win[i - 1]));
+  const syllabicRate = m > 1e-6 ? percentile(adj, 0.5) / m : 0;
+  const speechGate = clamp01(m / (opts.speechGateLevel * ref));
+  const speechiness = clamp01(syllabicRate / 0.35) * speechGate;
   const audio = clamp01((1 - opts.speechWeight) * level + opts.speechWeight * speechiness);
   return { audio, level_mean: m, level_p90: p90, speechiness, windows: win.length };
 }
@@ -592,6 +640,10 @@ export async function scoreCandidates(
         })
       );
     }
+    // Eligibility: a partial candidate can only own the slice when NOTHING
+    // covers it fully (see ScoredCandidate.eligible). Computed per slice.
+    const hasFull = row.some((c) => !c.signals.partial);
+    for (const c of row) c.eligible = hasFull ? !c.signals.partial : true;
     row.sort((a, b) => b.score - a.score || (a.clip_id < b.clip_id ? -1 : 1));
     scoreMatrix.push(row);
   }
@@ -657,7 +709,9 @@ async function scoreOne(
   let face = opts.missingSignalScore;
   if (hasFrames) face = clamp01(await deps.faceScorer.score(ctx));
 
-  const coverage = clamp01(cand.source_duration_ms / (cand.window.end_ms - cand.window.start_ms));
+  const sliceMs = cand.window.end_ms - cand.window.start_ms;
+  const coverage = clamp01(cand.source_duration_ms / sliceMs);
+  const partial = coverage < 0.999;
   const confidence = ctx.clip.sync_confidence ?? 1;
   const sync_factor = clamp(0.85 + 0.15 * confidence, 0.85, 1);
 
@@ -671,10 +725,11 @@ async function scoreOne(
     audio,
     face,
     coverage,
+    partial,
     speechiness,
     sync_factor,
   };
-  return { ...cand, score, signals };
+  return { ...cand, score, signals, eligible: true };
 }
 
 /**

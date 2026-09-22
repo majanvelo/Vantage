@@ -65,6 +65,8 @@ export interface CandidateSignals {
   face: number;
   /** Fraction of the slice this clip can actually fill (0..1]. */
   coverage: number;
+  /** True when coverage < 1 (the clip only overlaps part of this slice). */
+  partial: boolean;
   /** Envelope variation inside the window — a cheap speech-likeness proxy. */
   speechiness: number;
   /** Alignment-confidence damping applied (0.85..1 by default). */
@@ -76,6 +78,15 @@ export interface ScoredCandidate extends ClipSliceCandidate {
   /** Fused, weighted score before penalties — comparable across candidates. */
   score: number;
   signals: CandidateSignals;
+  /**
+   * Whether the selector may pick this candidate. A PARTIAL candidate (one that
+   * covers only part of the slice) cannot own the slice while some other clip can
+   * fill it completely, so it is ineligible then — picking it would leave a hole
+   * inside a slice, which the slice model does not represent. Partial candidates
+   * stay eligible when they are the only footage for that slice; their shot is
+   * then clamped to the real footage and the uncovered remainder is a gap.
+   */
+  eligible: boolean;
 }
 
 /** Per-candidate scoring context handed to pluggable scorers (e.g. FaceScorer). */
@@ -212,7 +223,9 @@ export interface DirectorShot {
 
 /** Slices where no clip had any footage — the film cannot cover them. */
 export interface DirectorGap extends SliceWindow {
+  /** Index of the slice this gap falls in (a gap may be part of one slice). */
   slice_index: number;
+  reason: "no_footage" | "partial_coverage";
 }
 
 /** A no-jump-cut taboo that had to be broken to keep the timeline covered. */
