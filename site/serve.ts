@@ -48,11 +48,22 @@ for (let attempt = 1; ; attempt++) {
           const { handleUploadRequest } = await import("./src/lib/uploadHandler");
           return handleUploadRequest(req);
         }
-        if (pathname === "/api/solo/render-status") {
-          // Polled by the solo page while the ffmpeg render runs in the
+        if (
+          pathname === "/api/solo/render-status" ||
+          /^\/api\/events\/[^/]+\/render-status\/?$/.test(pathname)
+        ) {
+          // Polled by the solo page (and by the collaborative event page, which
+          // uses the event-scoped path) while the ffmpeg render runs in the
           // background, so the progress bar never freezes. Returns live stage/%
-          // plus whether it's done (or errored).
-          const eventId = new URL(req.url).searchParams.get("event_id") ?? "";
+          // plus whether it's done (or errored). Both paths share the same
+          // renderer state (render.ts, keyed by event id) — /api/solo/render-status
+          // is unchanged, so solo keeps working exactly as before.
+          const url = new URL(req.url);
+          let eventId = url.searchParams.get("event_id") ?? "";
+          if (!eventId) {
+            const m = /^\/api\/events\/([^/]+)\/render-status\/?$/.exec(pathname);
+            if (m) eventId = decodeURIComponent(m[1]);
+          }
           const { getRenderProgress, elapsedSeconds, getDurableRenderState } = await import("./src/lib/render");
           const p = getRenderProgress(eventId);
           let body: Record<string, unknown>;

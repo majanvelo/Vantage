@@ -563,6 +563,51 @@ export const startSoloRender = createServerFn({ method: "POST" }).handler(
 );
 
 // ---------------------------------------------------------------------------
+// POST /api/events/render  → START the auto-cut render of a COLLABORATIVE
+// event: the director's shot list is cut out of the aligned clips and baked into
+// ONE finished MP4 (uploads/<eventId>/finished.mp4), returning immediately. The
+// ffmpeg work runs in the background in this process; the event page polls
+// GET /api/events/<id>/render-status (see serve.ts) for live stage/%. Idempotent:
+// an already-rendered event is not re-rendered.
+// ---------------------------------------------------------------------------
+export const startEventRender = createServerFn({ method: "POST" }).handler(
+  async ({ data }: { data: { event_id?: unknown } }): Promise<StartRenderResult> => {
+    await ensureSchema();
+    const eventId = typeof data?.event_id === "string" ? data.event_id : "";
+    if (!eventId) return error("Missing event id.");
+    const evs = await query(`select id from events where id = $1 and mode = 'collaborative'`, [
+      eventId,
+    ]);
+    if (evs.length === 0) return error("Event not found.");
+    // At least one syncable video clip must exist (the render itself needs two
+    // aligned clips; this is the cheap pre-check so the button fails fast and
+    // with a clear message instead of starting a render that cannot cut).
+    const syncable = await query(
+      `select 1 from clips
+        where event_id = $1 and media_type = 'video' and s3_or_storage_key is not null
+        limit 1`,
+      [eventId]
+    );
+    if (syncable.length === 0) {
+      return error(
+        "No syncable video clips yet — add at least two video clips that share audio."
+      );
+    }
+    const { renderEventVideo, getDurableRenderState, seedRenderDone } = await import("./render");
+    // Idempotent against durable state (same contract as startSoloRender).
+    const durable = await getDurableRenderState(eventId);
+    if (durable.status === "done" && durable.finished_key) {
+      seedRenderDone(eventId);
+      return { ok: true as const };
+    }
+    // Fire-and-forget: the render continues in the background; live progress is
+    // read via the status endpoint. We do NOT await the heavy work here.
+    void renderEventVideo(eventId);
+    return { ok: true as const };
+  }
+);
+
+// ---------------------------------------------------------------------------
 // GET /api/events/:id/sync  → return the stored alignment (no heavy work). The
 // page uses this to load existing offsets without re-solving.
 // ---------------------------------------------------------------------------

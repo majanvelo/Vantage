@@ -8,6 +8,7 @@ import {
   type Member,
 } from "~/lib/vantage";
 import AlignedPlayback from "~/components/AlignedPlayback";
+import EventMovie from "~/components/EventMovie";
 
 export type EventLoad =
   | { ok: true; event: Event; members: Member[]; clips: Clip[] }
@@ -336,6 +337,13 @@ export default function EventWorkspace({
         {clips.length > 0 && (
           <div className="mt-6">
             <AlignedPlayback clips={clips} eventId={event.id} />
+          </div>
+        )}
+
+        {/* Make movie — the auto-cut director's finished film (collaborative only). */}
+        {event.mode === "collaborative" && (
+          <div className="mt-6">
+            <EventMovie eventId={event.id} clips={clips} />
           </div>
         )}
       </main>

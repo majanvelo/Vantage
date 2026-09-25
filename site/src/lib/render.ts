@@ -34,11 +34,17 @@
  * node:child_process / ffmpeg deps never reach the client bundle.
  */
 
-import { mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdir, writeFile, rm, stat, copyFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { query } from "~/db";
 import { absolutePath, uploadsRoot } from "~/lib/storage";
+// The auto-cut director (Phase 2a). renderEventVideo consumes its shot list —
+// it never re-implements the scoring or the switcher (see director/types.ts,
+// "RENDER INTEGRATION POINT").
+import { scoreCandidates } from "./director/score";
+import { selectShots } from "./director/select";
+import type { DirectorClip } from "./director/types";
 import {
   DEFAULT_MUSIC_STYLE,
   autoMusicStyle,
@@ -1024,6 +1030,412 @@ export async function renderSoloVideo(eventId: string): Promise<SoloRenderOutcom
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error("render: solo render failed", e);
+      setProgress(eventId, {
+        stage: "Something went wrong rendering",
+        percent: 90,
+        done: true,
+        error: msg,
+      });
+      await query(
+        `insert into renders (event_id, status, error)
+         values ($1, 'error', $2)
+         on conflict (event_id) do update
+           set status = 'error', error = excluded.error, updated_at = now()`,
+        [eventId, msg]
+      ).catch(() => {});
+      return { ok: false, message: msg };
+    } finally {
+      renderLock.delete(eventId);
+    }
+  })();
+
+  renderLock.set(eventId, run.then(() => undefined));
+  return run;
+}
+
+// ---------------------------------------------------------------------------
+// COLLABORATIVE EVENT RENDER (Phase 2b) — the auto-cut director's shot list,
+// baked into ONE finished MP4.
+//
+// Unlike solo (which lays its own clips back-to-back, no alignment), a
+// collaborative event has ONE shared timeline: every phone recorded the same
+// moment from a different angle. So the film is not the clips in upload order —
+// it is the DIRECTOR's shot list: for each 4 s slice of the shared timeline the
+// scored candidates (steadiest camera, best audio, faces in frame) are fed to
+// the Viterbi switcher, which returns an ordered, non-overlapping, gap-free
+// list of shots with no jump cuts (A→B→A flap is a taboo).
+//
+// This function is the RENDERER half of that contract. It does not re-implement
+// any of it: it imports src/lib/director/{score,select} and consumes
+// `selectShots`' DirectorShot[] exactly as documented in director/types.ts
+// (DirectorRendererContract). Per shot it cuts the clip's OWN file at
+//     source = shot.start_ms − clip.offset_ms
+// with the same trim/scale/encode pattern renderSoloVideo uses for its segments,
+// then losslessly concatenates the shots in order. The audio bed is therefore
+// the shot's own ALIGNED audio: because every shot is cut at its aligned position
+// on the shared timeline, playing the shots in order reproduces the event's real
+// soundtrack, with the picture switching between cameras on top of it.
+// ---------------------------------------------------------------------------
+
+/** The director's default slice length on the shared timeline (4 s). */
+const DIRECTOR_SLICE_MS = 4000;
+/** Shots shorter than this are slivers (a clamped clip tail), not shots. */
+const MIN_SHOT_MS = 100;
+
+/** Does this path exist on disk? (node:fs based — no Bun global needed.) */
+async function fileExists(p: string): Promise<boolean> {
+  try {
+    await stat(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Shape of the persisted `event_sync.offsets` jsonb (see sync/service.ts). */
+type StoredSyncEntry = {
+  clip_id: string;
+  offset_ms: number;
+  duration_ms: number;
+  confidence?: number;
+  mean_residual_ms?: number;
+};
+
+/**
+ * Render a COLLABORATIVE event into uploads/<eventId>/finished.mp4 using the
+ * auto-cut director, persist the durable marker, and report live progress.
+ * Best-effort idempotent: a completed render returns immediately.
+ */
+export async function renderEventVideo(eventId: string): Promise<SoloRenderOutcome> {
+  // One render at a time per event (same in-process lock solo uses).
+  if (renderLock.has(eventId)) {
+    await renderLock.get(eventId);
+    return { ok: true };
+  }
+
+  // Skip if a durable done marker + real file already exist.
+  const existing = await query<{ status: string; finished_key: string | null }>(
+    `select status, finished_key from renders where event_id = $1`,
+    [eventId]
+  );
+  if (existing.length > 0 && existing[0].status === "done" && existing[0].finished_key) {
+    const ok = await fileExists(absolutePath(existing[0].finished_key));
+    if (ok) {
+      setProgress(eventId, { stage: "Done", percent: 100, done: true });
+      return { ok: true };
+    }
+  }
+
+  const run = (async () => {
+    setProgress(eventId, { stage: "Loading the clip pool…", percent: 6, done: false });
+    try {
+      // --- 1. Event + prefs -------------------------------------------------
+      const evs = await query<{ prefs: unknown; theme_id: string | null; title: string }>(
+        `select prefs, theme_id, title from events where id = $1 and mode = 'collaborative'`,
+        [eventId]
+      );
+      if (evs.length === 0) throw new Error("Event not found.");
+      const prefs = (evs[0].prefs ?? {}) as Record<string, unknown>;
+      const colorChain = filterChain(String(prefs.filter ?? "none").toLowerCase());
+
+      // --- 2. The pool: only syncable VIDEO clips can be cut ---------------- 
+      const allClips = await query<{
+        id: string;
+        media_type: string;
+        s3_or_storage_key: string | null;
+      }>(
+        `select id, media_type, s3_or_storage_key
+           from clips where event_id = $1 order by created_at, id`,
+        [eventId]
+      );
+      const videos = allClips.filter(
+        (c) => c.media_type === "video" && c.s3_or_storage_key
+      );
+      if (videos.length === 0) {
+        if (allClips.some((c) => c.media_type === "photo")) {
+          throw new Error(
+            "This event only has photos so far. Photos on the timeline arrive in Phase 3 — add video clips that share audio to cut a movie."
+          );
+        }
+        throw new Error("This event has no clips to render yet.");
+      }
+      const videoById = new Map(videos.map((v) => [v.id, v]));
+
+      // Durable in-flight marker. NOTE: the renders table's CHECK constraint
+      // allows ('pending','done','error') only, so the in-flight state is
+      // 'pending' (exactly what solo uses) rather than adding a new enum value
+      // in this milestone; the status endpoint reads live progress separately.
+      await query(
+        `insert into renders (event_id, status, error) values ($1, 'pending', null)
+         on conflict (event_id) do update
+           set status = 'pending', error = null, updated_at = now()`,
+        [eventId]
+      );
+
+      // --- 3. The stored alignment (run it only if there is none) -----------
+      let entries: StoredSyncEntry[] = [];
+      let timelineMs = 0;
+      const srows = await query<{ offsets: unknown; timeline_ms: number }>(
+        `select offsets, timeline_ms from event_sync where event_id = $1`,
+        [eventId]
+      );
+      if (srows.length > 0) {
+        const o = (srows[0].offsets ?? {}) as { entries?: StoredSyncEntry[] };
+        entries = Array.isArray(o.entries) ? o.entries : [];
+        timelineMs = Number(srows[0].timeline_ms ?? 0);
+      }
+      if (entries.length < 2 || !(timelineMs > 0)) {
+        setProgress(eventId, { stage: "Aligning the cameras…", percent: 12 });
+        const { solveEventSync } = await import("./sync/service");
+        const solved = await solveEventSync(eventId);
+        entries = solved.entries;
+        timelineMs = solved.timeline_ms;
+      }
+      if (entries.length < 2 || !(timelineMs > 0)) {
+        throw new Error(
+          "Vantage needs at least two clips that share audio before it can cut a movie. Add another clip that captured the same moment."
+        );
+      }
+
+      // --- 4. Director clips: aligned geometry + the cached audio envelope --
+      const participants = entries.filter((e) => videoById.has(e.clip_id));
+      if (participants.length < 2) {
+        throw new Error(
+          "Vantage needs at least two clips that share audio before it can cut a movie. Add another clip that captured the same moment."
+        );
+      }
+      const featRows = await query<{ clip_id: string; values: unknown; window_ms: number }>(
+        `select clip_id, values, window_ms from audio_features where clip_id = any($1::uuid[])`,
+        [participants.map((p) => p.clip_id)]
+      );
+      const featById = new Map(featRows.map((f) => [f.clip_id, f]));
+
+      const directorClips: DirectorClip[] = [];
+      for (const e of participants) {
+        const row = videoById.get(e.clip_id)!;
+        const abs = absolutePath(row.s3_or_storage_key!);
+        // Trust whichever duration is SHORTER (the decoded audio length or the
+        // file's real video length) so a shot can never ask for source time past
+        // the end of the file.
+        const probed = await ffprobeVideoDuration(abs);
+        const declared = Number(e.duration_ms) > 0 ? Number(e.duration_ms) : 0;
+        const durationMs = Math.round(
+          probed && declared ? Math.min(probed, declared) : probed || declared || 0
+        );
+        if (durationMs <= 0) continue;
+        const feats = featById.get(e.clip_id);
+        directorClips.push({
+          clip_id: e.clip_id,
+          offset_ms: Math.round(e.offset_ms),
+          duration_ms: durationMs,
+          file_path: abs,
+          media_type: "video",
+          envelope:
+            feats && Array.isArray(feats.values)
+              ? { values: (feats.values as number[]).map(Number), windowMs: feats.window_ms }
+              : undefined,
+          sync_confidence: typeof e.confidence === "number" ? e.confidence : 1,
+          mean_residual_ms: e.mean_residual_ms,
+        });
+      }
+      if (directorClips.length < 2) {
+        throw new Error("Not enough usable video clips to cut a movie.");
+      }
+
+      // --- 5. The director: score every candidate, then select shots --------
+      // No re-implementation here — scoreCandidates/selectShots are imported
+      // from src/lib/director and driven with the event's real timeline.
+      setProgress(eventId, {
+        stage: "Choosing the best camera for every moment…",
+        percent: 22,
+      });
+      const scored = await scoreCandidates({
+        clips: directorClips,
+        timeline_ms: timelineMs,
+        options: { sliceMs: DIRECTOR_SLICE_MS },
+      });
+      setProgress(eventId, {
+        stage: "Cutting the film — picking shots…",
+        percent: 44,
+      });
+      const selection = selectShots(
+        scored.scoreMatrix,
+        scored.slices,
+        { sliceMs: DIRECTOR_SLICE_MS },
+        directorClips
+      );
+      if (selection.shots.length === 0) {
+        throw new Error("No footage could be cut into shots for this event.");
+      }
+
+      // --- 6. Render every shot from its clip's own source window -----------
+      const eventDir = path.join(uploadsRoot(), eventId);
+      const renderDir = path.join(eventDir, "render");
+      await mkdir(renderDir, { recursive: true });
+
+      const clipById = new Map(directorClips.map((c) => [c.clip_id, c]));
+      const segmentInputs: string[] = [];
+      const renderedShots: Array<{
+        clip_id: string;
+        start_ms: number;
+        end_ms: number;
+        source_start_ms: number;
+        source_end_ms: number;
+      }> = [];
+      const shotTotal = selection.shots.length;
+      for (let i = 0; i < shotTotal; i++) {
+        const shot = selection.shots[i];
+        const clip = clipById.get(shot.clip_id);
+        if (!clip) continue;
+        // shared-timeline time → this clip's own file time
+        const sourceStart = Math.max(0, Math.round(shot.start_ms - clip.offset_ms));
+        const sourceEnd = Math.min(
+          clip.duration_ms,
+          Math.round(shot.end_ms - clip.offset_ms)
+        );
+        const durMs = sourceEnd - sourceStart;
+        if (durMs < MIN_SHOT_MS) continue; // clamped-away sliver, not a shot
+
+        setProgress(eventId, {
+          stage: `Cutting shot ${i + 1} of ${shotTotal}…`,
+          percent: Math.round(44 + ((i + 1) / shotTotal) * 44),
+        });
+
+        const out = path.join(renderDir, `shot_${String(i).padStart(3, "0")}.mp4`);
+        const vf = [
+          `scale=${W}:${H}:force_original_aspect_ratio=increase`,
+          `crop=${W}:${H}`,
+        ];
+        if (colorChain) vf.push(colorChain);
+        vf.push("format=yuv420p");
+        // Both -ss (accurate seek) and -t (source window length) are put on the
+        // INPUT so ffmpeg reads only the shot's own window of the file — the
+        // picture is cut where the director said, and the audio that comes with
+        // it is that same moment's audio from that camera.
+        const durS = (durMs / 1000).toFixed(3);
+        const shotHasAudio = await hasAudioStream(absolutePath(videoById.get(shot.clip_id)!.s3_or_storage_key!));
+        const args: string[] = [
+          "-ss", (sourceStart / 1000).toFixed(3),
+          "-t", durS,
+          "-i", clip.file_path!,
+        ];
+        // An audio-less window still gets a silent track so every segment has the
+        // same v+a layout and concat never silently drops the film's audio.
+        if (!shotHasAudio) {
+          args.push("-f", "lavfi", "-t", durS, "-i", SILENT_AUDIO_INPUT);
+        }
+        args.push(
+          "-vf", vf.join(","),
+          "-r", String(FPS),
+          "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+          "-c:a", "aac", "-ar", "44100", "-b:a", "128k", "-ac", "2",
+          "-t", durS,
+          out
+        );
+        await runFfmpeg(args);
+        segmentInputs.push(out);
+        renderedShots.push({
+          clip_id: shot.clip_id,
+          start_ms: shot.start_ms,
+          end_ms: shot.end_ms,
+          source_start_ms: sourceStart,
+          source_end_ms: sourceEnd,
+        });
+      }
+      if (segmentInputs.length === 0) {
+        throw new Error("No shots could be rendered for this event.");
+      }
+
+      // --- 7. Lossless concat in shot order = the switched film -------------
+      setProgress(eventId, { stage: "Stitching the cuts together…", percent: 92 });
+      const listFile = path.join(renderDir, "list.txt");
+      await writeFile(
+        listFile,
+        segmentInputs.map((s) => `file '${s.replace(/'/g, "'\\''")}'`).join("\n") + "\n"
+      );
+      const concatPath = path.join(renderDir, "concat.mp4");
+      await runFfmpeg([
+        "-f", "concat", "-safe", "0", "-i", listFile,
+        "-c", "copy", concatPath,
+      ]);
+      if (!(await fileExists(concatPath))) {
+        throw new Error("Render produced no output file.");
+      }
+
+      // Shot list written next to the film: the director's decisions, kept as
+      // evidence for this render and as the input Phase 3's theme pass builds on.
+      const cameraSequence: string[] = [];
+      for (const s of renderedShots) {
+        if (cameraSequence[cameraSequence.length - 1] !== s.clip_id) cameraSequence.push(s.clip_id);
+      }
+      await writeFile(
+        path.join(eventDir, "director.json"),
+        JSON.stringify(
+          {
+            event_id: eventId,
+            generated_by: "renderEventVideo (Phase 2b)",
+            slice_ms: DIRECTOR_SLICE_MS,
+            timeline_ms: timelineMs,
+            clips: directorClips.map((c) => ({
+              clip_id: c.clip_id,
+              offset_ms: c.offset_ms,
+              duration_ms: c.duration_ms,
+              sync_confidence: c.sync_confidence,
+            })),
+            shots: renderedShots,
+            gaps: selection.gaps,
+            violations: selection.violations,
+            camera_sequence: cameraSequence,
+            total_switch_penalty: selection.total_switch_penalty,
+          },
+          null,
+          1
+        )
+      );
+      console.log(
+        `[event-render] ${eventId}: ${renderedShots.length} shots over ${timelineMs}ms, cameras ${cameraSequence
+          .map((c) => c.slice(0, 8))
+          .join(" → ")}`
+      );
+
+      const finishedPath = path.join(eventDir, "finished.mp4");
+      // Style pass only when the organizer actually chose one (border / caption).
+      // The AUDIO BED IS THE SHOTS' OWN AUDIO — no synthesized music bed in this
+      // milestone (music layering is Phase 3, see the report).
+      const borderOn = prefs.border_on === true;
+      const caption =
+        typeof prefs.caption === "string" && prefs.caption.trim()
+          ? prefs.caption.trim()
+          : null;
+      if (borderOn || caption !== null) {
+        await finalizeSoloVideo(concatPath, finishedPath, {
+          borderOn,
+          caption,
+          musicStyle: null,
+          themeId: evs[0].theme_id,
+        });
+      } else {
+        await copyFile(concatPath, finishedPath);
+      }
+      if (!(await fileExists(finishedPath))) {
+        throw new Error("Render produced no output file.");
+      }
+
+      // --- 8. Durable done marker (status polling reads this) ---------------
+      const finishedKey = `uploads/${eventId}/finished.mp4`;
+      await query(
+        `insert into renders (event_id, status, finished_key, error)
+         values ($1, 'done', $2, null)
+         on conflict (event_id) do update
+           set status = 'done', finished_key = excluded.finished_key, error = null, updated_at = now()`,
+        [eventId, finishedKey]
+      );
+      await rm(renderDir, { recursive: true, force: true }).catch(() => {});
+      setProgress(eventId, { stage: "Done", percent: 100, done: true });
+      return { ok: true };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("render: event render failed", e);
       setProgress(eventId, {
         stage: "Something went wrong rendering",
         percent: 90,
