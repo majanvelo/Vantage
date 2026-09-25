@@ -109,7 +109,6 @@ export function selectShots(
   let frontier: State[] = [];
   const chosen: State[] = []; // one surviving state per slice (backtrace anchor)
   const gaps: DirectorGap[] = [];
-  const violations: DirectorViolation[] = [];
   const partialSlices: number[] = [];
 
   for (let t = 0; t < slices.length; t++) {

@@ -35,7 +35,7 @@
  * and reads it back to prove the artifact is consumable by Phase 2b.
  */
 
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { extractAudioFeatures } from "../src/lib/sync/features";
 import {
@@ -76,8 +76,19 @@ function pad(s: string, n: number): string {
 // ffmpeg / ffprobe helpers (Bun stream API — child_process listeners deliver
 // nothing under Bun, which once cost us a silent unbounded render)
 // ---------------------------------------------------------------------------
+/** Same minimal local shape as score.ts — avoids depending on the Bun global
+ *  types being present in tsconfig (they are not). */
+interface SpawnedProcess {
+  stdout: ReadableStream<Uint8Array>;
+  stderr: ReadableStream<Uint8Array>;
+  exited: Promise<number>;
+}
+const BUN = (globalThis as unknown as {
+  Bun: { spawn: (cmd: string[], opts?: Record<string, unknown>) => SpawnedProcess };
+}).Bun;
+
 async function ffmpegOk(args: string[]): Promise<void> {
-  const child = Bun.spawn([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", ...args], {
+  const child = BUN.spawn([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", ...args], {
     stdin: "ignore",
     stdout: "ignore",
     stderr: "pipe",
@@ -88,7 +99,7 @@ async function ffmpegOk(args: string[]): Promise<void> {
 }
 
 async function ffprobeDurationS(file: string): Promise<number> {
-  const child = Bun.spawn(
+  const child = BUN.spawn(
     ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-print_format", "json", file],
     { stdin: "ignore", stdout: "pipe", stderr: "ignore" }
   );
@@ -783,7 +794,7 @@ async function main(): Promise<number> {
 
   console.log("\n=== 9) ARTIFACT ===");
   await writeFile(OUT_JSON, JSON.stringify(artifact, null, 2), "utf8");
-  const back = (await Bun.file(OUT_JSON).json()) as typeof artifact;
+  const back = JSON.parse(await readFile(OUT_JSON, "utf8")) as typeof artifact;
   const backShots = back.shots.map((s) => `${s.clip_id}[${s.start_ms},${s.end_ms})`).join(" ");
   const memShots = selection.shots.map((s) => `${s.clip_id}[${s.start_ms},${s.end_ms})`).join(" ");
   console.log(`   wrote ${OUT_JSON} (${JSON.stringify(artifact).length} bytes)`);

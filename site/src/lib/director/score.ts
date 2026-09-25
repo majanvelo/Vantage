@@ -11,7 +11,7 @@
  *      difference (d_i, 0..1) and express it PER SECOND of video (so the number
  *      does not depend on the probe frame rate):
  *          motionPerSec = mean(d_i) * fps      (how much the picture changes)
- *          jitterPerSec = stddev(d_i) * fps    (how ERRATIC that change is)
+ *          jitterPerSec = MAD(d_i) * fps       (how ERRATIC that change is)
  *      A hand-held camera both moves fast and moves erratically, so stability is
  *          1 − (0.55·min(1, motion/motionRef) + 0.45·min(1, jitter/jitterRef))
  *      Calibration defaults (motionRef = 0.12, jitterRef = 0.10) were picked from
@@ -85,13 +85,6 @@ function mean(xs: number[]): number {
   let s = 0;
   for (const x of xs) s += x;
   return s / xs.length;
-}
-function stddev(xs: number[]): number {
-  if (xs.length < 2) return 0;
-  const m = mean(xs);
-  let s = 0;
-  for (const x of xs) s += (x - m) * (x - m);
-  return Math.sqrt(s / xs.length);
 }
 /** p-th percentile of an unsorted array (p in 0..1). */
 function percentile(xs: number[], p: number): number {
@@ -219,12 +212,23 @@ export function buildCandidates(
 // 2) the visual probe — ONE low-res decode pass per clip
 // ---------------------------------------------------------------------------
 
+/** Minimal shape of a spawned child we need (kept local so this file never
+ *  depends on the Bun global types being installed in tsconfig). */
+interface SpawnedProcess {
+  stdout: ReadableStream<Uint8Array>;
+  stderr: ReadableStream<Uint8Array>;
+  exited: Promise<number>;
+}
+const BUN = (globalThis as unknown as {
+  Bun: { spawn: (cmd: string[], opts?: Record<string, unknown>) => SpawnedProcess };
+}).Bun;
+
 /** ffmpeg → Buffer, reading the pipes with the Bun stream API (required here:
  *  `on("data")` listeners never deliver bytes under Bun and silently deadlock). */
 async function runFfmpegToBuffer(
   args: string[]
 ): Promise<{ ok: boolean; stdout: Buffer; stderr: string }> {
-  const child = Bun.spawn(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", ...args], {
+  const child = BUN.spawn(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", ...args], {
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
