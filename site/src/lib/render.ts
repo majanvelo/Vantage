@@ -35,7 +35,6 @@
  */
 
 import { mkdir, writeFile, rm, stat, copyFile } from "node:fs/promises";
-import { spawn } from "node:child_process";
 import path from "node:path";
 import { query } from "~/db";
 import { absolutePath, uploadsRoot } from "~/lib/storage";

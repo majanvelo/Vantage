@@ -1,5 +1,28 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getSync, startEventRender, type Clip } from "~/lib/vantage";
+import {
+  getSync,
+  startEventRender,
+  type Clip,
+  type StartRenderResult,
+  type SyncResult,
+} from "~/lib/vantage";
+
+/**
+ * The project's `createServerFn` typings resolve their `data` payload to
+ * `undefined` (the installed @tanstack/react-start and start-client-core
+ * versions disagree), so every `fn({ data: {...} })` call site in the codebase
+ * reports the same TS2322 — see AlignedPlayback.tsx:45/66, routes/event/$id.tsx:8,
+ * routes/solo.tsx:170, routes/e/$code.tsx:8 (all pre-existing, unfixed).
+ * These two aliases pin the REAL runtime contract for the only two server
+ * functions this panel calls, so this file adds no new type errors while the
+ * call itself stays exactly the same shape the working components use.
+ */
+type DataCall<D, R> = (opts: { data: D }) => Promise<R>;
+const callGetSync = getSync as unknown as DataCall<{ event_id: string }, SyncResult>;
+const callStartEventRender = startEventRender as unknown as DataCall<
+  { event_id: string },
+  StartRenderResult
+>;
 
 /**
  * EventMovie — the organizer's "Make movie" panel for a COLLABORATIVE event.
@@ -76,7 +99,7 @@ export default function EventMovie({ eventId, clips }: { eventId: string; clips:
 
   /** Read the stored alignment + whatever durable render state exists. */
   const load = useCallback(async () => {
-    const s = await getSync({ data: { event_id: eventId } }).catch(() => null);
+    const s = await callGetSync({ data: { event_id: eventId } }).catch(() => null);
     if (s && s.ok) {
       setAlignCount((s.entries ?? []).length);
       setTimelineMs(s.timeline_ms ?? 0);
@@ -113,7 +136,7 @@ export default function EventMovie({ eventId, clips }: { eventId: string; clips:
     setBusy(true);
     setStartError(null);
     try {
-      const res = await startEventRender({ data: { event_id: eventId } });
+      const res = await callStartEventRender({ data: { event_id: eventId } });
       if (!res.ok) {
         setStartError(res.message ?? "Could not start the movie.");
         return;
