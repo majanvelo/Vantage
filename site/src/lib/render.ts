@@ -200,6 +200,11 @@ function ffprobeJson(args: string[]): Promise<any> {
  * Duration of a file's FIRST VIDEO STREAM, or null. Preferred over the container
  * duration for the film: it is the picture length that the finished video (and
  * therefore its audio) must match exactly.
+ *
+ * UNIT: SECONDS — this is ffprobe's own unit (see ffprobeDuration below). Callers
+ * that work in milliseconds (e.g. the director's clip footprints) MUST scale by
+ * 1000; mixing the two silently truncates a 12-second clip to a 12-millisecond
+ * one and the render then drops every shot as a "clamped-away sliver".
  */
 async function ffprobeVideoDuration(filePath: string): Promise<number | null> {
   try {
@@ -1216,7 +1221,16 @@ export async function renderEventVideo(eventId: string): Promise<SoloRenderOutco
         // Trust whichever duration is SHORTER (the decoded audio length or the
         // file's real video length) so a shot can never ask for source time past
         // the end of the file.
-        const probed = await ffprobeVideoDuration(abs);
+        //
+        // UNITS: ffprobeVideoDuration returns ffprobe's own SECONDS; the sync
+        // entry's duration_ms is MILLISECONDS. Comparing the two raw (as this
+        // did) put a 12005 ms clip's footprint at `min(12.005, 12005) = 12`
+        // milliseconds, so `coveredRangeFor` clamped every slice to a 12 ms
+        // window, the director emitted a single 12 ms shot, the renderer dropped
+        // it (durMs < MIN_SHOT_MS) and the whole film died as "No shots could be
+        // rendered for this event." Convert BEFORE the min.
+        const probedSeconds = await ffprobeVideoDuration(abs);
+        const probed = probedSeconds && probedSeconds > 0 ? Math.round(probedSeconds * 1000) : 0;
         const declared = Number(e.duration_ms) > 0 ? Number(e.duration_ms) : 0;
         const durationMs = Math.round(
           probed && declared ? Math.min(probed, declared) : probed || declared || 0
@@ -1273,6 +1287,18 @@ export async function renderEventVideo(eventId: string): Promise<SoloRenderOutco
       await mkdir(renderDir, { recursive: true });
 
       const clipById = new Map(directorClips.map((c) => [c.clip_id, c]));
+      // Shot-loop audit trail: the director's geometry and the ids it hands the
+      // renderer, so a future "no shots" failure names its own cause instead of
+      // dying as one generic throw (see the two skip logs below).
+      console.log(
+        `render: event ${eventId} director → ${directorClips.length} clip(s) ${directorClips
+          .map(
+            (c) =>
+              `${c.clip_id.slice(0, 8)}(offset=${c.offset_ms},dur=${c.duration_ms}${c.file_path ? "" : ",NO_FILE"})`
+          )
+          .join(" ")} | timeline ${timelineMs}ms | ${scored.slices.length} slice(s) | ${selection.shots.length} shot(s) | ${selection.gaps.length} gap(s)`
+      );
+      console.log(`render: event ${eventId} first shots ${JSON.stringify(selection.shots.slice(0, 5))}`);
       const segmentInputs: string[] = [];
       const renderedShots: Array<{
         clip_id: string;
@@ -1285,7 +1311,12 @@ export async function renderEventVideo(eventId: string): Promise<SoloRenderOutco
       for (let i = 0; i < shotTotal; i++) {
         const shot = selection.shots[i];
         const clip = clipById.get(shot.clip_id);
-        if (!clip) continue;
+        if (!clip) {
+          console.log(
+            `render: skip shot ${i}/${shotTotal} — clip_id ${JSON.stringify(shot.clip_id)} is NOT one of the ${clipById.size} director clip id(s) [${[...clipById.keys()].map((k) => k.slice(0, 8)).join(", ")}]; shot ${shot.start_ms}→${shot.end_ms}ms`
+          );
+          continue;
+        }
         // shared-timeline time → this clip's own file time
         const sourceStart = Math.max(0, Math.round(shot.start_ms - clip.offset_ms));
         const sourceEnd = Math.min(
@@ -1293,7 +1324,12 @@ export async function renderEventVideo(eventId: string): Promise<SoloRenderOutco
           Math.round(shot.end_ms - clip.offset_ms)
         );
         const durMs = sourceEnd - sourceStart;
-        if (durMs < MIN_SHOT_MS) continue; // clamped-away sliver, not a shot
+        if (durMs < MIN_SHOT_MS) {
+          console.log(
+            `render: skip shot ${i}/${shotTotal} — ${shot.clip_id.slice(0, 8)} timeline ${shot.start_ms}→${shot.end_ms}ms, clip offset ${clip.offset_ms}ms dur ${clip.duration_ms}ms ⇒ source ${sourceStart}→${sourceEnd}ms = ${durMs}ms (< MIN_SHOT_MS ${MIN_SHOT_MS})`
+          );
+          continue; // clamped-away sliver, not a shot
+        }
 
         setProgress(eventId, {
           stage: `Cutting shot ${i + 1} of ${shotTotal}…`,
